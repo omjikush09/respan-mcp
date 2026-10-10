@@ -37,6 +37,11 @@ export function pageShape(defaultSize: number, maxSize: number) {
   };
 }
 
+/** Tells the caller when its page_size was capped, instead of capping silently. */
+export function pageSizeNote(requested: number | undefined, maxSize: number) {
+  return requested !== undefined && requested > maxSize ? { page_size_capped_from: requested } : {};
+}
+
 export function resolvePage(
   args: { page?: number; page_size?: number },
   defaultSize: number,

@@ -121,3 +121,56 @@ export function readListPage(result: unknown, pageSize: number) {
   const hasMore = typeof body.next === "string" || (body.next === undefined && rows.length === pageSize);
   return { rows, hasMore };
 }
+
+export interface ListPage {
+  page: number;
+  page_size: number;
+  has_more: boolean;
+}
+
+/**
+ * Serializes one page of list rows within `budget`, and never cuts silently.
+ * Long strings are shortened first, through `stringCaps`; if the rows still do
+ * not fit, rows are dropped from the end. The page then says what happened:
+ * `returned`, `truncated` with a hint, and `next_page` when it is safe to just
+ * move on (it is withheld when rows were dropped, since the next page would
+ * skip them).
+ */
+export function budgetedPage(
+  envelope: Record<string, unknown> & ListPage,
+  rows: readonly unknown[],
+  budget: JsonBudget,
+  detailHint: string,
+): string {
+  const render = (kept: readonly unknown[], cap?: number) => {
+    const omittedRows = rows.length - kept.length;
+    const truncated = cap === undefined && omittedRows === 0 ? undefined : {
+      ...(cap !== undefined ? { strings_shortened_to: cap } : {}),
+      ...(omittedRows > 0 ? { omitted_rows: omittedRows } : {}),
+      hint: omittedRows > 0
+        ? `Only ${kept.length} of ${rows.length} rows fit. Ask again with fewer fields, or with page_size=${kept.length} starting from page 1.`
+        : detailHint,
+    };
+    return JSON.stringify({
+      ...envelope,
+      returned: kept.length,
+      ...(envelope.has_more && omittedRows === 0 ? { next_page: envelope.page + 1 } : {}),
+      ...(truncated ? { truncated } : {}),
+      results: cap === undefined ? kept : truncateStrings(kept, cap),
+    });
+  };
+
+  let cap: number | undefined;
+  let text = render(rows);
+  for (const stringCap of budget.stringCaps) {
+    if (text.length <= budget.maxChars) return text;
+    cap = stringCap;
+    text = render(rows, cap);
+  }
+  let kept = rows.length;
+  while (text.length > budget.maxChars && kept > 1) {
+    kept = Math.max(1, Math.floor(kept * 0.8));
+    text = render(rows.slice(0, kept), cap);
+  }
+  return text;
+}

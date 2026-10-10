@@ -124,7 +124,7 @@ describe('log_list', () => {
       status: 'failed',
       thread_identifier: 'chat-1',
       filters: [{ field: 'latency', operator: 'gt', value: [5] }],
-      page_size: 50,
+      page_size: 500,
     });
     const { path, query, body } = call();
     expect(path).toBe('/api/request-logs/list/');
@@ -134,7 +134,7 @@ describe('log_list', () => {
       environment: 'prod',
       sort_by: '-timestamp',
       page: '1',
-      page_size: '10',
+      page_size: '100',
     });
     expect(query.include_fields.split(',')).toContain('unique_id');
     expect(body).toEqual({
@@ -169,10 +169,68 @@ describe('log_list', () => {
     });
     const { log_list } = captureTools(client);
     const result = parsed(await log_list.handler({ page_size: 5 }));
-    expect(result).toMatchObject({ page: 1, page_size: 5, has_more: true });
+    expect(result).toMatchObject({ page: 1, page_size: 5, has_more: true, returned: 1, next_page: 2 });
     // The endpoint's `count` is the page length, so no total is reported.
     expect(result).not.toHaveProperty('total');
+    expect(result).not.toHaveProperty('truncated');
     expect(result.results).toEqual([{ unique_id: 'log-1', model: 'gpt-4o', cost: 0.01 }]);
+  });
+
+  it('defaults to 25 rows and says when page_size was capped', async () => {
+    const { client } = fakeClient();
+    const { log_list } = captureTools(client);
+    expect(parsed(await log_list.handler({})).page_size).toBe(25);
+    expect(parsed(await log_list.handler({ page_size: 1000 }))).toMatchObject({
+      page_size: 100,
+      page_size_capped_from: 1000,
+    });
+  });
+
+  it('adds the requested fields to the backend query and to each row', async () => {
+    const { client, call } = fakeClient({
+      results: [{ id: 'log-1', model: 'gpt-4o', environment: 'prod', provider_id: 'openai', full_request: 'x' }],
+    });
+    const { log_list } = captureTools(client);
+    const result = parsed(await log_list.handler({ fields: ['environment', 'provider_id'] }));
+    expect(call().query.include_fields.split(',')).toEqual(expect.arrayContaining(['environment', 'provider_id']));
+    expect(result.results).toEqual([{ unique_id: 'log-1', model: 'gpt-4o', environment: 'prod', provider_id: 'openai' }]);
+  });
+
+  it('shortens strings first and says so, keeping every row and next_page', async () => {
+    const rows = Array.from({ length: 100 }, (_, i) => ({
+      id: `log-${i}`,
+      error_message: 'x'.repeat(290),
+      metadata: { request: 'y'.repeat(290), session: 'z'.repeat(290) },
+    }));
+    const { client } = fakeClient({ results: rows, next: 'https://api.example.invalid/?page=2' });
+    const { log_list } = captureTools(client);
+    const text = (await log_list.handler({ page_size: 100, fields: ['metadata'] })).content[0].text;
+    const result = JSON.parse(text);
+
+    expect(text.length).toBeLessThanOrEqual(40_000);
+    expect(result.returned).toBe(100);
+    expect(result.truncated).toMatchObject({ strings_shortened_to: expect.any(Number), hint: expect.stringContaining('log_get') });
+    expect(result.truncated).not.toHaveProperty('omitted_rows');
+    expect(result.next_page).toBe(2);
+  });
+
+  it('drops rows from the end only as a last resort, and then withholds next_page', async () => {
+    const metadata = Object.fromEntries(Array.from({ length: 40 }, (_, k) => [`key_${k}`, 'm'.repeat(200)]));
+    const rows = Array.from({ length: 100 }, (_, i) => ({ id: `log-${i}`, metadata }));
+    const { client } = fakeClient({ results: rows, next: 'https://api.example.invalid/?page=2' });
+    const { log_list } = captureTools(client);
+    const text = (await log_list.handler({ page_size: 100, fields: ['metadata'] })).content[0].text;
+    const result = JSON.parse(text);
+
+    expect(text.length).toBeLessThanOrEqual(40_000);
+    expect(result.returned).toBeLessThan(100);
+    expect(result.results).toHaveLength(result.returned);
+    expect(result.results[0].unique_id).toBe('log-0');
+    expect(result.truncated.omitted_rows).toBe(100 - result.returned);
+    expect(result.truncated.hint).toContain(`page_size=${result.returned}`);
+    // Moving on to page 2 would skip the dropped rows.
+    expect(result).not.toHaveProperty('next_page');
+    expect(result.has_more).toBe(true);
   });
 });
 
@@ -241,7 +299,7 @@ describe('trace_list', () => {
     });
     const { path, query, body } = call();
     expect(path).toBe('/api/traces/list/');
-    expect(query).toMatchObject({ sort_by: '-total_cost', page: '1', page_size: '5' });
+    expect(query).toMatchObject({ sort_by: '-total_cost', page: '1', page_size: '20' });
     expect(body).toEqual({
       filters: {
         customer_identifier: { operator: '', value: ['user-7'] },

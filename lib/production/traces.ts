@@ -13,6 +13,7 @@ import {
   INTERNAL_RESPONSE_KEYS,
   READ_ONLY_WORKSPACE_TOOL,
   budgetedJson,
+  budgetedPage,
   omitKeys,
   readListPage,
   textResult,
@@ -22,6 +23,7 @@ import {
   environmentShape,
   filterConditionSchema,
   pageShape,
+  pageSizeNote,
   resolvePage,
   resolveTimeWindow,
   timeWindowShape,
@@ -133,8 +135,8 @@ export const TRACE_SORT_OPTIONS = [
   "-span_count",
 ] as const;
 
-const TRACE_PAGE_SIZE_DEFAULT = 5;
-const TRACE_PAGE_SIZE_MAX = 10;
+const TRACE_PAGE_SIZE_DEFAULT = 20;
+const TRACE_PAGE_SIZE_MAX = 50;
 
 /** Columns trace_list returns per row. The span tree is left to trace_get. */
 export const TRACE_LIST_FIELDS = [
@@ -168,7 +170,9 @@ const SPAN_CONTENT_KEYS: ReadonlySet<string> = new Set([
 
 /** List rows carry previews only; trace_get has the full text. */
 const TRACE_PREVIEW_CHARS = 200;
-const TRACE_LIST_BUDGET = { maxChars: 20_000, stringCaps: [80] };
+/** Under Claude Code's 10k-token warning; strings shrink before rows are dropped. */
+const TRACE_LIST_BUDGET = { maxChars: 40_000, stringCaps: [80, 40] };
+const TRACE_LIST_DETAIL_HINT = "Previews were shortened. Call trace_get with a trace_unique_id to see every span.";
 const TRACE_DETAIL_BUDGET = { maxChars: 60_000, stringCaps: [2_000, 600, 200] };
 
 function projectTraceRow(row: unknown): Record<string, unknown> {
@@ -187,9 +191,9 @@ export function registerTraceTools(server: McpServer, client: AuthenticatedClien
       title: "Find traces",
       description: `Find traces: complete runs of an agent or workflow, each made of many spans (LLM calls, tool calls, steps). Use it for "most expensive agent runs today", "runs that errored" or "runs for user X".
 
-Returns one page of rollups per trace: ${TRACE_LIST_FIELDS.join(", ")}. input and output are short previews; call trace_get with a trace_unique_id to see every span.
+Returns one page of rollups per trace (default ${TRACE_PAGE_SIZE_DEFAULT}, up to ${TRACE_PAGE_SIZE_MAX}): ${TRACE_LIST_FIELDS.join(", ")}. input and output are short previews; call trace_get with a trace_unique_id to see every span.
 
-Defaults to the last 24 hours, newest first.`,
+Each page says how many rows it returned, whether anything was shortened (\`truncated\`), and \`next_page\` when there are more. Defaults to the last 24 hours, newest first.`,
       inputSchema: {
         ...timeWindowShape,
         ...environmentShape,
@@ -237,13 +241,18 @@ Defaults to the last 24 hours, newest first.`,
       });
 
       const { rows, hasMore } = readListPage(result, pageSize);
-      return textResult(budgetedJson({
-        ...window,
-        page,
-        page_size: pageSize,
-        has_more: hasMore,
-        results: rows.map(projectTraceRow),
-      }, TRACE_LIST_BUDGET));
+      return textResult(budgetedPage(
+        {
+          ...window,
+          page,
+          page_size: pageSize,
+          ...pageSizeNote(args.page_size, TRACE_PAGE_SIZE_MAX),
+          has_more: hasMore,
+        },
+        rows.map(projectTraceRow),
+        TRACE_LIST_BUDGET,
+        TRACE_LIST_DETAIL_HINT,
+      ));
     },
   );
 
