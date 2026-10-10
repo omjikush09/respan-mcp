@@ -10,6 +10,7 @@ import {
   securelyMatchesHash,
 } from './crypto.js';
 import { emitOAuthEvent } from './events.js';
+import { grantedScope, requestedScope } from './scopes.js';
 import { InvalidAccessTokenError, OAuthRequestError } from './errors.js';
 import {
   RECORD_VERSION,
@@ -35,6 +36,8 @@ export type TokenPair = {
   refresh_token: string;
   token_type: 'Bearer';
   expires_in: number;
+  /** Absent for sessions issued before scopes existed. */
+  scope?: string;
 };
 
 export type ResolvedAccess = {
@@ -56,6 +59,8 @@ type AuthorizationInput = {
   clientState: string;
   codeChallenge: string;
   resource?: string;
+  /** Raw `scope` from /authorize; see requestedScope(). */
+  scope?: string;
 };
 
 type CompleteAuthorizationInput = {
@@ -121,6 +126,7 @@ function tokenPairRecords(
     resource: code.resource,
     encryptedBackendAccessJwt: code.encryptedBackendAccessJwt,
     backendAccessExpiresAt: code.backendAccessExpiresAt,
+    ...(code.scope !== undefined ? { scope: code.scope } : {}),
     issuedAt: now,
     expiresAt: now + accessTtlSeconds * 1000,
   };
@@ -135,6 +141,7 @@ function tokenPairRecords(
     currentAccessTokenHash: accessTokenHash,
     encryptedBackendRefreshJwt: code.encryptedBackendRefreshJwt,
     backendRefreshExpiresAt: code.backendRefreshExpiresAt,
+    ...(code.scope !== undefined ? { scope: code.scope } : {}),
     issuedAt: now,
     absoluteExpiresAt: now + refreshTtlSeconds * 1000,
   };
@@ -144,6 +151,7 @@ function tokenPairRecords(
       refresh_token: refreshToken,
       token_type: 'Bearer',
       expires_in: accessTtlSeconds,
+      ...(code.scope !== undefined ? { scope: code.scope } : {}),
     },
     accessTokenHash,
     accessSession,
@@ -188,6 +196,7 @@ export class OAuthBroker {
       resource,
       browserCsrfHash: hashBrowserCsrf(browserCsrf),
       isApproved: false,
+      requestedScope: requestedScope(input.scope),
       createdAt: now,
       expiresAt: now + this.dependencies.config.authorizationTransactionTtlSeconds * 1000,
     };
@@ -234,6 +243,7 @@ export class OAuthBroker {
     transactionToken: string,
     browserCsrf: string,
     encryptedBackendCookies?: string,
+    isWriteApproved = false,
   ): Promise<PendingAuthorization> {
     const stored = await this.getPendingAuthorization(
       realm,
@@ -245,6 +255,7 @@ export class OAuthBroker {
       ...stored.value,
       isApproved: true,
       approvedAt: now,
+      scope: grantedScope(stored.value.requestedScope, isWriteApproved),
       ...(encryptedBackendCookies ? { encryptedBackendCookies } : {}),
     };
     const ttlSeconds = Math.max(1, remainingSeconds(stored.value.expiresAt, now));
@@ -299,6 +310,7 @@ export class OAuthBroker {
         this.dependencies.config.secret,
       ),
       backendRefreshExpiresAt,
+      ...(stored.value.scope !== undefined ? { scope: stored.value.scope } : {}),
       createdAt: now,
       expiresAt: now + this.dependencies.config.authorizationCodeTtlSeconds * 1000,
     };
@@ -523,6 +535,8 @@ export class OAuthBroker {
           this.dependencies.config.secret,
         ),
         backendRefreshExpiresAt,
+        // Carried forward as issued: a refresh can never widen it.
+        ...(record.scope !== undefined ? { scope: record.scope } : {}),
         createdAt: now,
         expiresAt: now,
       };

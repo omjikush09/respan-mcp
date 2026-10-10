@@ -51,6 +51,8 @@ No installation required.
 
 3. Restart Cursor/Claude Desktop
 
+**Read-only by default.** When you connect with OAuth (sign in through the browser instead of pasting a key), the client only gets tools that read your data. To let it create, update, deploy or delete, tick **Also allow changes** on the consent page. Calls to change tools from a read-only connection return an `insufficient_scope` error that explains how to reconnect. With an API key, the key's own permissions apply; create a key with read-only permissions for the same effect.
+
 ---
 
 ### Option 2: Local Stdio

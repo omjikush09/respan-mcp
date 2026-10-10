@@ -12,11 +12,16 @@ import { registerDatasetTools } from '../evaluate/datasets.js';
 import { registerEvaluationPipelineTools } from '../evaluate/pipelines.js';
 import { registerWorkflowTools } from '../develop/workflows.js';
 import { registerOrganizationTools } from '../account/organizations.js';
-import { applyToolPolicy } from './tool-policy.js';
+import {
+  applyToolPolicy,
+  hiddenWriteToolsOf,
+  registerReadOnlyToolsOnly,
+} from './tool-policy.js';
 import { resolveToolName, rewriteToolCallNames } from './tool-aliases.js';
 import { OAuthBroker, type ResolvedAccess } from '../oauth/broker.js';
 import { getOAuthConfig, type OAuthRealm } from '../oauth/config.js';
 import { InvalidAccessTokenError } from '../oauth/errors.js';
+import { isReadOnlySession, MCP_READ_SCOPE, MCP_WRITE_SCOPE } from '../oauth/scopes.js';
 import { getSessionStore } from '../oauth/store-factory.js';
 import { SessionStoreUnavailableError } from '../oauth/store.js';
 import {
@@ -27,12 +32,16 @@ import {
 export function createServer(
   client: AuthenticatedClient | null,
   enabledTools?: Set<string>,
+  isReadOnly = false,
 ): McpServer {
   const server = new McpServer({
     name: 'respan',
     version: '1.0.0',
   });
   applyToolPolicy(server);
+  // Before the enabled-tools filter, so a tool the caller turned off is not
+  // reported as hidden for lack of scope.
+  if (isReadOnly) registerReadOnlyToolsOnly(server);
 
   if (enabledTools?.size) {
     const originalTool = server.tool.bind(server);
@@ -82,6 +91,47 @@ function sendUnauthorized(
     error: { code: -32001, message: 'Unauthorized' },
     id: null,
   });
+}
+
+/** The single tools/call in `body` that targets a hidden write tool, if any. */
+function hiddenWriteToolCall(
+  server: McpServer,
+  body: unknown,
+): { id: unknown; name: string } | undefined {
+  const hidden = hiddenWriteToolsOf(server);
+  if (hidden.size === 0 || !body || typeof body !== 'object' || Array.isArray(body)) return undefined;
+  const { id, method, params } = body as { id?: unknown; method?: unknown; params?: { name?: unknown } };
+  if (method !== 'tools/call' || typeof params?.name !== 'string' || !hidden.has(params.name)) return undefined;
+  return { id, name: params.name };
+}
+
+/**
+ * A tool error, not a protocol error, so the agent reads why and what to do.
+ * `_meta["mcp/www_authenticate"]` lets ChatGPT offer the user a new consent.
+ */
+function insufficientScopeResult(toolName: string, resourceMetadataPath: string) {
+  const scope = `${MCP_READ_SCOPE} ${MCP_WRITE_SCOPE}`;
+  return {
+    content: [{
+      type: 'text',
+      text: JSON.stringify({
+        error: {
+          code: 'insufficient_scope',
+          message: `${toolName} changes data, and this connection is read-only.`,
+          hint: 'Ask the user to reconnect Respan and tick "Also allow changes" on the '
+            + 'consent page. Read-only tools keep working without it.',
+          required_scope: MCP_WRITE_SCOPE,
+        },
+      }),
+    }],
+    isError: true,
+    _meta: {
+      'mcp/www_authenticate': [
+        `Bearer error="insufficient_scope", scope="${scope}", `
+          + `resource_metadata="${canonicalPublicBaseUrl()}${resourceMetadataPath}"`,
+      ],
+    },
+  };
 }
 
 function sdkBackendBaseUrl(baseUrl: string): string {
@@ -216,12 +266,22 @@ export function createMcpHandler(
         ? new Set(enabledToolsHeader.split(',').map((tool) => resolveToolName(tool.trim())).filter(Boolean))
         : undefined;
 
-      const server = createServer(authenticatedClient, enabledTools);
+      // API keys carry their own permissions, enforced by the backend.
+      const isReadOnly = oauthAccess ? isReadOnlySession(oauthAccess.session.scope) : false;
+      const server = createServer(authenticatedClient, enabledTools, isReadOnly);
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
       });
       await server.connect(transport);
       const renamedTools = rewriteToolCallNames(req.body);
+      const blockedCall = hiddenWriteToolCall(server, req.body);
+      if (blockedCall) {
+        return res.status(200).json({
+          jsonrpc: '2.0',
+          id: blockedCall.id,
+          result: insufficientScopeResult(blockedCall.name, resourceMetadataPath),
+        });
+      }
       if (renamedTools.length > 0) {
         console.warn(`MCP tools/call used old tool name(s): ${renamedTools.join(', ')}`);
       }

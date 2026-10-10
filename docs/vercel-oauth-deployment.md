@@ -99,13 +99,24 @@ public broker boundary.
 | Upstash usage controls | Use a Free plan for Preview. For Production, use the approved plan with a $10 monthly budget cap and usage alerts when supported. Confirm current pricing before approval. |
 | Deployment retention | Retain the last known-good Production deployment for immediate rollback. |
 
+### OAuth scopes
+
+An OAuth connection is read-only unless the user allows changes at consent.
+
+- `mcp:read` is always granted. It reaches the tools annotated `readOnlyHint: true`.
+- `mcp:write` reaches every other tool. It is granted only when the client asked for it, which a missing `scope` parameter counts as, and the user ticked "Also allow changes" on the login page.
+- The granted scope is stored on the code and on the access and refresh sessions. It is returned as `scope` from `/token`, and a refresh carries it forward unchanged.
+- A read-only session does not list write tools. Calling one returns a tool error `insufficient_scope`, with `_meta["mcp/www_authenticate"]` so ChatGPT can offer a new consent.
+- API keys are not filtered here: the backend enforces each key's own permissions, and `["*:read"]` keys are read-only.
+
+**Treat this change as roll-forward only.** A deploy from before scopes existed ignores the stored `scope`, so rolling back gives read-only sessions full access again.
+
 ### Not required for this release
 
 - Vercel Blob, Edge Config, Postgres, or the separate official Redis product.
 - A new Vercel Cron Job.
 - Rolling Releases.
 - A deployment hook.
-- A new scope or permission service.
 - A new OAuth client-registration service.
 - A Vercel Firewall exception, unless an existing team policy blocks the MCP
   endpoints.
@@ -235,6 +246,7 @@ will not be retained for future release verification.
 | `MCP_ACCESS_TOKEN_TTL_SECONDS` | Yes for rollout | `60` | `14400` | Preview uses 60 seconds to prove expiry. Production uses four hours. |
 | `RESPAN_API_BASE_URL` | Recommended | `https://api.respan.ai/api` | `https://api.respan.ai/api` | Platform realm backend. |
 | `RESPAN_ENTERPRISE_API_BASE_URL` | Recommended | `https://endpoint.respan.ai/api` | `https://endpoint.respan.ai/api` | Enterprise realm backend. |
+| `MCP_LEGACY_SCOPE` | No | unset | unset | Governs sessions issued before OAuth scopes existed. Unset keeps their full access until they expire, at most 30 days. `read` makes them read-only at once. See "OAuth scopes" below. |
 
 The following broker variables have validated defaults and normally do not need
 Vercel overrides:

@@ -138,3 +138,40 @@ export function applyToolPolicy(server: McpServer): void {
     return registered;
   };
 }
+
+const hiddenWriteTools = new WeakMap<McpServer, Set<string>>();
+
+/**
+ * For a read-only session: registers only tools annotated readOnlyHint: true.
+ * A tool with no annotation counts as a write, so a new tool stays hidden from
+ * read-only sessions until it is marked read-only on purpose. Apply it after
+ * applyToolPolicy and before any filter that should run first.
+ */
+export function registerReadOnlyToolsOnly(server: McpServer): void {
+  const hidden = new Set<string>();
+  hiddenWriteTools.set(server, hidden);
+  const originalTool = server.tool.bind(server);
+  (server as any).tool = function (name: string) {
+    if (TOOL_ANNOTATIONS[name]?.readOnlyHint !== true) {
+      hidden.add(name);
+      return undefined;
+    }
+    return originalTool.apply(server, arguments as any);
+  };
+  const originalRegisterTool = (server as any).registerTool.bind(server);
+  (server as any).registerTool = function (
+    name: string,
+    config?: { annotations?: ToolAnnotations },
+  ) {
+    if (config?.annotations?.readOnlyHint !== true) {
+      hidden.add(name);
+      return undefined;
+    }
+    return originalRegisterTool.apply(server, arguments as any);
+  };
+}
+
+/** Tools registerReadOnlyToolsOnly kept off `server`; empty when it was not applied. */
+export function hiddenWriteToolsOf(server: McpServer): ReadonlySet<string> {
+  return hiddenWriteTools.get(server) ?? new Set();
+}

@@ -36,6 +36,7 @@ export function createAuthorizeHandler(realm: OAuthRealm) {
       code_challenge_method,
       state,
       resource,
+      scope,
     } = req.query as Record<string, string | undefined>;
     if (response_type !== 'code') {
       return res.status(400).json({ error: 'unsupported_response_type' });
@@ -78,6 +79,7 @@ export function createAuthorizeHandler(realm: OAuthRealm) {
         clientState: state,
         codeChallenge: code_challenge,
         resource,
+        scope,
       });
       const loginParams = new URLSearchParams({
         mode: 'oauth',
