@@ -259,6 +259,20 @@ cd ../respan-backend
 
 If a tool this server registers was renamed or removed in the backend, startup fails loudly rather than dropping it.
 
+### Telemetry
+
+The hosted endpoints (`/mcp`, `/mcp/enterprise`, `/mcp/docs`) write one JSON line to stdout for each of these events. On Vercel the lines land in the runtime logs (`lib/shared/telemetry.ts`).
+
+| `evt` | When | Main fields |
+|---|---|---|
+| `mcp.tool_call` | Every tool call, and every call to a tool this server does not have | `tool`, `status` (`ok`, `tool_error`, `exception`, `unknown_tool`), `latency_ms`, `result_chars`, `arg_keys`, `http_status`, `error_class` |
+| `mcp.session_init` | `initialize` | `client_name`, `client_version`, `requested_protocol_version` |
+| `mcp.tool_alias` | A call that used an old tool name | `old_names` |
+
+Every line also carries `realm`, `auth_kind` (`oauth`, `jwt`, `api_key`, `env`, `none`), `user_agent`, `protocol_version` and `session_key`. The `session_key` is the first 12 hex characters of the SHA-256 of the bearer, so one client's stateless calls can be grouped together.
+
+Argument values, tool results and credentials are never logged. stdio is not instrumented, because there stdout carries the protocol and the process runs on the user's machine.
+
 ---
 
 ## Enterprise Configuration

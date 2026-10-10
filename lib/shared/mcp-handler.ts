@@ -14,6 +14,12 @@ import { registerWorkflowTools } from '../develop/workflows.js';
 import { registerOrganizationTools } from '../account/organizations.js';
 import { applyToolPolicy } from './tool-policy.js';
 import { resolveToolName, rewriteToolCallNames } from './tool-aliases.js';
+import {
+  instrumentToolCalls,
+  recordRequest,
+  telemetryContext,
+  type TelemetryContext,
+} from './telemetry.js';
 import { OAuthBroker, type ResolvedAccess } from '../oauth/broker.js';
 import { getOAuthConfig, type OAuthRealm } from '../oauth/config.js';
 import { InvalidAccessTokenError } from '../oauth/errors.js';
@@ -27,6 +33,7 @@ import {
 export function createServer(
   client: AuthenticatedClient | null,
   enabledTools?: Set<string>,
+  telemetry?: TelemetryContext,
 ): McpServer {
   const server = new McpServer({
     name: 'respan',
@@ -46,6 +53,8 @@ export function createServer(
       return originalRegisterTool.apply(server, arguments as any);
     };
   }
+  // Last, so it sees only the tools the filter above lets through.
+  if (telemetry) instrumentToolCalls(server, telemetry);
 
   registerProductionTools(server, client);
   registerPulseTools(server, client);
@@ -216,15 +225,14 @@ export function createMcpHandler(
         ? new Set(enabledToolsHeader.split(',').map((tool) => resolveToolName(tool.trim())).filter(Boolean))
         : undefined;
 
-      const server = createServer(authenticatedClient, enabledTools);
+      const telemetry = telemetryContext(realm, bearer, req.headers);
+      const server = createServer(authenticatedClient, enabledTools, telemetry);
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
       });
       await server.connect(transport);
       const renamedTools = rewriteToolCallNames(req.body);
-      if (renamedTools.length > 0) {
-        console.warn(`MCP tools/call used old tool name(s): ${renamedTools.join(', ')}`);
-      }
+      recordRequest(server, telemetry, req.body, renamedTools);
       const transportResponse = await transport.handleRequest(
         toWebRequest(req),
         { parsedBody: req.body },

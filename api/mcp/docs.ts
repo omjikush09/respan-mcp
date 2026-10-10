@@ -4,6 +4,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { registerDocTools } from '../../lib/docs/tools.js';
 import { applyToolPolicy } from '../../lib/shared/tool-policy.js';
 import { rewriteToolCallNames } from '../../lib/shared/tool-aliases.js';
+import { instrumentToolCalls, recordRequest, telemetryContext } from '../../lib/shared/telemetry.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, s-maxage=0');
@@ -31,6 +32,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       version: '1.0.0',
     });
     applyToolPolicy(server);
+    // The docs server needs no credential, so every caller counts as 'none'.
+    const telemetry = { ...telemetryContext('docs', undefined, req.headers), authKind: 'none' as const };
+    instrumentToolCalls(server, telemetry);
 
     registerDocTools(server);
 
@@ -40,7 +44,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     await server.connect(transport);
 
-    rewriteToolCallNames(req.body);
+    const renamedTools = rewriteToolCallNames(req.body);
+    recordRequest(server, telemetry, req.body, renamedTools);
     await transport.handleRequest(
       req as any,
       res as any,
