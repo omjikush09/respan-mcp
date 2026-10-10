@@ -181,7 +181,9 @@ async function authorizeWithConsent(input: {
   metadata: JsonObject;
   clientId: string;
   allowWrites: boolean;
+  resource?: string;
 }): Promise<JsonObject> {
+  const requestedResource = input.resource ?? resource;
   const verifier = randomBytes(64).toString('base64url');
   const authorize = new URL(input.metadata.authorization_endpoint);
   authorize.search = new URLSearchParams({
@@ -191,7 +193,7 @@ async function authorizeWithConsent(input: {
     state: randomBytes(24).toString('base64url'),
     code_challenge: createHash('sha256').update(verifier).digest('base64url'),
     code_challenge_method: 'S256',
-    resource,
+    resource: requestedResource,
   }).toString();
   const redirected = await fetch(authorize, { redirect: 'manual' });
   const login = new URL(required(redirected.headers.get('location') || undefined, 'Login redirect'), baseUrl);
@@ -220,7 +222,7 @@ async function authorizeWithConsent(input: {
       code_verifier: verifier,
       client_id: input.clientId,
       redirect_uri: callbackUrl,
-      resource,
+      resource: requestedResource,
     }),
   });
   assert(exchanged.ok, 'Second authorization code exchange failed');
@@ -471,6 +473,27 @@ async function run(): Promise<void> {
       const tools = await mcpRequest(writePair.access_token, 'tools/list', {}, 33);
       const names = (tools.body.result?.tools ?? []).map((tool: JsonObject) => tool.name);
       assert(names.includes('prompt_deploy'), 'Write-approved session does not list prompt_deploy');
+    });
+
+    await step('read-only URL grants read scope even when changes are allowed', async () => {
+      const readOnlyPath = `${mcpPath}/readonly`;
+      const readOnlyPair = await authorizeWithConsent({
+        metadata,
+        clientId: registration.client_id,
+        allowWrites: true,
+        resource: `${baseUrl}${readOnlyPath}`,
+      });
+      assert(readOnlyPair.scope === 'mcp:read', 'Read-only URL issued more than read scope');
+      for (const path of [readOnlyPath, mcpPath]) {
+        const tools = await mcpRequest(readOnlyPair.access_token, 'tools/list', {}, 34, path);
+        const names = (tools.body.result?.tools ?? []).map((tool: JsonObject) => tool.name);
+        assert(names.includes('log_list') && !names.includes('prompt_deploy'), `${path} is not read-only for this token`);
+      }
+      if (apiKey) {
+        const keyTools = await mcpRequest(apiKey, 'tools/list', {}, 35, readOnlyPath);
+        const names = (keyTools.body.result?.tools ?? []).map((tool: JsonObject) => tool.name);
+        assert(!names.includes('prompt_deploy'), 'Read-only URL lists write tools for an API key');
+      }
     });
 
     await step('access expiry returns canonical 401', async () => {

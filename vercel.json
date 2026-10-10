@@ -4,10 +4,14 @@
   "outputDirectory": "dist/client",
   "rewrites": [
     { "source": "/mcp", "destination": "/api/mcp" },
+    { "source": "/mcp/readonly", "destination": "/api/mcp/readonly" },
+    { "source": "/mcp/enterprise/readonly", "destination": "/api/mcp/enterprise-readonly" },
     { "source": "/mcp/enterprise", "destination": "/api/mcp/enterprise" },
     { "source": "/mcp/docs", "destination": "/api/mcp/docs" },
     { "source": "/auth", "destination": "/api/auth" },
     { "source": "/login", "destination": "/login.html" },
+    { "source": "/.well-known/oauth-protected-resource/mcp/readonly", "destination": "/api/well-known/oauth-protected-resource-readonly" },
+    { "source": "/.well-known/oauth-protected-resource/mcp/enterprise/readonly", "destination": "/api/well-known/oauth-protected-resource-enterprise-readonly" },
     { "source": "/.well-known/oauth-protected-resource/mcp", "destination": "/api/well-known/oauth-protected-resource" },
     { "source": "/.well-known/oauth-protected-resource/mcp/enterprise", "destination": "/api/well-known/oauth-protected-resource-enterprise" },
     { "source": "/.well-known/oauth-protected-resource/enterprise", "destination": "/api/well-known/oauth-protected-resource-enterprise" },
@@ -81,6 +85,12 @@
       "maxDuration": 800
     },
     "api/mcp/enterprise.ts": {
+      "maxDuration": 800
+    },
+    "api/mcp/readonly.ts": {
+      "maxDuration": 800
+    },
+    "api/mcp/enterprise-readonly.ts": {
       "maxDuration": 800
     },
     "api/mcp/docs.ts": {

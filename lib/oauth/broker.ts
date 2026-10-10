@@ -10,7 +10,7 @@ import {
   securelyMatchesHash,
 } from './crypto.js';
 import { emitOAuthEvent } from './events.js';
-import { grantedScope, requestedScope } from './scopes.js';
+import { grantedScope, MCP_READ_SCOPE, requestedScope } from './scopes.js';
 import { InvalidAccessTokenError, OAuthRequestError } from './errors.js';
 import {
   RECORD_VERSION,
@@ -177,7 +177,10 @@ export class OAuthBroker {
     transaction: PendingAuthorization;
   }> {
     const realmConfig = this.dependencies.config.realms[input.realm];
-    const resource = input.resource || realmConfig.resource;
+    // The read-only URL asks for read scope only, and its token is bound to
+    // the canonical resource so it works on both URLs.
+    const isReadOnlyResource = input.resource === realmConfig.readOnlyResource;
+    const resource = this.canonicalResource(input.realm, input.resource) || realmConfig.resource;
     if (resource !== realmConfig.resource) {
       throw new OAuthRequestError('invalid_request', 400, 'Invalid OAuth resource');
     }
@@ -196,7 +199,7 @@ export class OAuthBroker {
       resource,
       browserCsrfHash: hashBrowserCsrf(browserCsrf),
       isApproved: false,
-      requestedScope: requestedScope(input.scope),
+      requestedScope: isReadOnlyResource ? MCP_READ_SCOPE : requestedScope(input.scope),
       createdAt: now,
       expiresAt: now + this.dependencies.config.authorizationTransactionTtlSeconds * 1000,
     };
@@ -366,7 +369,7 @@ export class OAuthBroker {
       expectedChallenge !== code.codeChallenge
       || input.clientId !== code.clientId
       || input.redirectUri !== code.redirectUri
-      || (input.resource !== undefined && input.resource !== code.resource)
+      || (input.resource !== undefined && this.canonicalResource(code.realm, input.resource) !== code.resource)
       || code.resource !== this.dependencies.config.realms[code.realm].resource
     ) {
       throw new OAuthRequestError('invalid_grant', 400, 'Authorization code binding mismatch');
@@ -393,6 +396,12 @@ export class OAuthBroker {
     }
     emitOAuthEvent('code_exchange_succeeded', code.realm, codeHash);
     return records.pair;
+  }
+
+  /** Maps a realm's read-only URL to its canonical resource; others pass through. */
+  private canonicalResource(realm: OAuthRealm, resource: string | undefined): string | undefined {
+    const realmConfig = this.dependencies.config.realms[realm];
+    return resource === realmConfig.readOnlyResource ? realmConfig.resource : resource;
   }
 
   private async findAuthorizationCode(codeHash: string) {
@@ -472,7 +481,7 @@ export class OAuthBroker {
       || record.backendRefreshExpiresAt <= now
       || record.clientId !== input.clientId
       || record.resource !== this.dependencies.config.realms[realm].resource
-      || (input.resource !== undefined && input.resource !== record.resource)
+      || (input.resource !== undefined && this.canonicalResource(realm, input.resource) !== record.resource)
     ) {
       await this.dependencies.store.deleteRefreshSession(
         realm,

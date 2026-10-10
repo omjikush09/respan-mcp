@@ -53,6 +53,8 @@ No installation required.
 
 **Read-only by default.** When you connect with OAuth (sign in through the browser instead of pasting a key), the client only gets tools that read your data. To let it create, update, deploy or delete, tick **Also allow changes** on the consent page. Calls to change tools from a read-only connection return an `insufficient_scope` error that explains how to reconnect. With an API key, the key's own permissions apply; create a key with read-only permissions for the same effect.
 
+**A URL that can never write.** `https://mcp.respan.ai/mcp/readonly` (and `/mcp/enterprise/readonly`) serves only read-only tools for every credential, OAuth or API key. A sign-in started from it grants read access only, and the consent page offers no "allow changes" option. Use it when a connector must stay read-only whatever the user picks.
+
 ---
 
 ### Option 2: Local Stdio

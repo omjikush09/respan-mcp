@@ -107,30 +107,37 @@ function hiddenWriteToolCall(
 
 /**
  * A tool error, not a protocol error, so the agent reads why and what to do.
- * `_meta["mcp/www_authenticate"]` lets ChatGPT offer the user a new consent.
+ * On a read-only consent, `_meta["mcp/www_authenticate"]` lets ChatGPT offer
+ * the user a new consent; on a read-only URL no consent can help, so the hint
+ * points at the full URL instead.
  */
-function insufficientScopeResult(toolName: string, resourceMetadataPath: string) {
+function insufficientScopeResult(
+  toolName: string,
+  resourceMetadataPath: string,
+  readOnlyEndpointPath?: string,
+) {
+  const error = {
+    code: 'insufficient_scope',
+    message: `${toolName} changes data, and this connection is read-only.`,
+    hint: readOnlyEndpointPath
+      ? `This server URL (${readOnlyEndpointPath}) only serves read-only tools. `
+        + 'Connect to the same URL without /readonly to use tools that change data.'
+      : 'Ask the user to reconnect Respan and tick "Also allow changes" on the '
+        + 'consent page. Read-only tools keep working without it.',
+    required_scope: MCP_WRITE_SCOPE,
+  };
   const scope = `${MCP_READ_SCOPE} ${MCP_WRITE_SCOPE}`;
   return {
-    content: [{
-      type: 'text',
-      text: JSON.stringify({
-        error: {
-          code: 'insufficient_scope',
-          message: `${toolName} changes data, and this connection is read-only.`,
-          hint: 'Ask the user to reconnect Respan and tick "Also allow changes" on the '
-            + 'consent page. Read-only tools keep working without it.',
-          required_scope: MCP_WRITE_SCOPE,
-        },
-      }),
-    }],
+    content: [{ type: 'text', text: JSON.stringify({ error }) }],
     isError: true,
-    _meta: {
-      'mcp/www_authenticate': [
-        `Bearer error="insufficient_scope", scope="${scope}", `
-          + `resource_metadata="${canonicalPublicBaseUrl()}${resourceMetadataPath}"`,
-      ],
-    },
+    ...(readOnlyEndpointPath ? {} : {
+      _meta: {
+        'mcp/www_authenticate': [
+          `Bearer error="insufficient_scope", scope="${scope}", `
+            + `resource_metadata="${canonicalPublicBaseUrl()}${resourceMetadataPath}"`,
+        ],
+      },
+    }),
   };
 }
 
@@ -186,10 +193,16 @@ function sendWebResponse(
   res.status(response.status).send(response.body);
 }
 
+export type McpHandlerOptions = {
+  /** A /readonly URL: read-only tools only, whatever the credential allows. */
+  readOnlyEndpointPath?: string;
+};
+
 export function createMcpHandler(
   defaultBaseUrl: string,
   resourceMetadataPath: string,
   realm: OAuthRealm,
+  options: McpHandlerOptions = {},
 ) {
   return async function handler(req: VercelRequest, res: VercelResponse) {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, s-maxage=0');
@@ -266,8 +279,10 @@ export function createMcpHandler(
         ? new Set(enabledToolsHeader.split(',').map((tool) => resolveToolName(tool.trim())).filter(Boolean))
         : undefined;
 
-      // API keys carry their own permissions, enforced by the backend.
-      const isReadOnly = oauthAccess ? isReadOnlySession(oauthAccess.session.scope) : false;
+      // API keys carry their own permissions, enforced by the backend; only a
+      // read-only URL narrows them here.
+      const isReadOnly = Boolean(options.readOnlyEndpointPath)
+        || (oauthAccess ? isReadOnlySession(oauthAccess.session.scope) : false);
       const server = createServer(authenticatedClient, enabledTools, isReadOnly);
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
@@ -279,7 +294,11 @@ export function createMcpHandler(
         return res.status(200).json({
           jsonrpc: '2.0',
           id: blockedCall.id,
-          result: insufficientScopeResult(blockedCall.name, resourceMetadataPath),
+          result: insufficientScopeResult(
+            blockedCall.name,
+            resourceMetadataPath,
+            options.readOnlyEndpointPath,
+          ),
         });
       }
       if (renamedTools.length > 0) {
