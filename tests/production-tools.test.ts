@@ -5,6 +5,7 @@ import { resolveTimeWindow } from '../lib/production/params.js';
 import { TRACE_FILTER_FIELDS } from '../lib/production/traces.js';
 import { VALIDATION_ERROR_CODE } from '../lib/shared/filter-fields.js';
 import { READ_ONLY_WORKSPACE_TOOL } from '../lib/shared/tool-result.js';
+import { BACKEND_TOOLS } from '../lib/shared/backend-tool.js';
 import type { AuthenticatedClient } from '../lib/shared/client.js';
 
 type ToolHandler = (args: any) => Promise<any>;
@@ -66,10 +67,13 @@ describe('production tool surface', () => {
       'end_user_rank_by_usage',
       'log_get',
       'log_list',
+      'log_summary',
       'thread_get',
       'thread_list',
+      'thread_summary',
       'trace_get',
       'trace_list',
+      'trace_summary',
     ]);
   });
 
@@ -77,7 +81,8 @@ describe('production tool surface', () => {
     for (const [name, tool] of Object.entries(tools)) {
       expect(tool.config.annotations, name).toEqual(READ_ONLY_WORKSPACE_TOOL);
       expect(tool.config.title, name).toBeTruthy();
-      expect(tool.config.description!.length, name).toBeLessThan(1_200);
+      // Catalog tools carry the backend's description verbatim.
+      if (!BACKEND_TOOLS.has(name)) expect(tool.config.description!.length, name).toBeLessThan(1_200);
     }
   });
 
@@ -367,5 +372,64 @@ describe('metric tools', () => {
     const { query, body } = call();
     expect(query).toMatchObject({ breakdown_by: 'customer_identifier', sort_by: 'number_of_requests', limit: '10' });
     expect(body).toEqual({ filters: { model: { operator: 'icontains', value: 'claude' } } });
+  });
+});
+
+describe('log_summary', () => {
+  it('mirrors the backend executor: aliases, shortcuts, org-scope stripping and the API-key default', async () => {
+    const { client, call } = fakeClient({ number_of_requests: 12, total_cost: 0.5, scores: { e1: {} } });
+    const { log_summary } = captureTools(client);
+    const result = parsed(await log_summary.handler({
+      start_time: '2026-09-01T00:00:00Z',
+      environment: 'prod',
+      model: 'gpt-4o',
+      status: 'failed',
+      include_scores: false,
+      filters: {
+        ttft: { operator: 'gt', value: [1] },
+        unique_organization_id: { operator: '', value: ['someone-else'] },
+        either: { connector: 'OR', filter_params: { unique_organization_id: { value: ['x'] }, speed: { operator: 'lt', value: [5] } } },
+      },
+    }));
+    const { path, query, body } = call();
+    expect(path).toBe('/clickhouse/request-logs/summary/');
+    expect(query).toEqual({ start_time: '2026-09-01T00:00:00Z', environment: 'prod' });
+    expect(body).toEqual({
+      filters: {
+        time_to_first_token: { operator: 'gt', value: [1] },
+        either: { connector: 'OR', filter_params: { tokens_per_second: { operator: 'lt', value: [5] } } },
+        model: { operator: 'icontains', value: 'gpt-4o' },
+        status: { operator: '', value: 'failed' },
+        organization_key_id: { operator: 'not_empty', value: true },
+      },
+    });
+    expect(result).toEqual({ number_of_requests: 12, total_cost: 0.5 });
+  });
+
+  it('drops the API-key default when asked to count every log', async () => {
+    const { client, call } = fakeClient({ number_of_requests: 3 });
+    const { log_summary } = captureTools(client);
+    await log_summary.handler({ filters: { organization_key_id: { operator: '', value: '' } } });
+    expect(call().body).toEqual({ filters: {} });
+  });
+});
+
+describe('trace_summary and thread_summary', () => {
+  it('post the window and filters without the org-scope field', async () => {
+    for (const [name, path] of [
+      ['trace_summary', '/clickhouse/traces/summary/'],
+      ['thread_summary', '/clickhouse/threads/summary/'],
+    ] as const) {
+      const { client, call } = fakeClient({ summary: {} });
+      const tool = captureTools(client)[name];
+      await tool.handler({
+        end_time: '2026-09-02T00:00:00Z',
+        filters: { unique_organization_id: { value: ['x'] }, error_count: { operator: 'gt', value: [0] } },
+      });
+      const sent = call();
+      expect(sent.path, name).toBe(path);
+      expect(sent.query, name).toEqual({ end_time: '2026-09-02T00:00:00Z' });
+      expect(sent.body, name).toEqual({ filters: { error_count: { operator: 'gt', value: [0] } } });
+    }
   });
 });

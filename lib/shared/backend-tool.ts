@@ -38,6 +38,8 @@ export function registerBackendTool(
   name: string,
   annotations: ToolAnnotations,
   handler: BackendToolHandler,
+  /** Display name for clients that show one; the catalog does not carry titles. */
+  title?: string,
 ): void {
   const tool = BACKEND_TOOLS.get(name);
   if (!tool) {
@@ -47,6 +49,7 @@ export function registerBackendTool(
   server.registerTool(
     name,
     {
+      ...(title ? { title } : {}),
       description: tool.description,
       inputSchema: toZodShape(tool.inputSchema),
       annotations,
