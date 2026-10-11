@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { resolveAuthFromEnv, createClient } from "./shared/client.js";
 import { registerProductionTools } from "./production/index.js";
+import { registerGuardrailTools } from "./pulses/guardrails.js";
 import { registerPulseTools } from "./pulses/index.js";
 import { registerPromptTools } from "./develop/prompts.js";
 import { registerExperimentTools } from "./develop/experiments.js";
@@ -32,6 +33,7 @@ async function main() {
 
   registerProductionTools(server, client);
   registerPulseTools(server, client);
+  registerGuardrailTools(server, client);
   registerPromptTools(server, client);
   registerExperimentTools(server, client);
   registerEvaluatorTools(server, client);
