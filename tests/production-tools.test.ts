@@ -67,6 +67,7 @@ describe('production tool surface', () => {
       'end_user_rank_by_usage',
       'log_filter_schema',
       'log_get',
+      'log_groups',
       'log_list',
       'log_summary',
       'thread_get',
@@ -401,6 +402,58 @@ describe('log_filter_schema', () => {
     await log_filter_schema.handler({});
 
     expect(call().query).toEqual({});
+  });
+});
+
+describe('log_groups', () => {
+  it('groups through the backend with log_list filters and keeps compact rows', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-11T08:00:00Z'));
+    const { client, call } = fakeClient({
+      results: [
+        { customer_identifier: 'initech_user_3', name: 'Initech', email: 'ops@initech.example', number_of_requests: 10,
+          error_count: 2, error_percentage: 20, total_cost: 0.5, total_prompt_tokens: 28000, total_completion_tokens: 900,
+          average_latency: 4.2, latency_p_95: null, date_group: '1970-01-01 00:00:00', max_tpm: null },
+      ],
+      next: null,
+      count: 1,
+    });
+    const { log_groups } = captureTools(client);
+
+    const result = parsed(await log_groups.handler({
+      group_by: 'customer_identifier',
+      filters: [{ field: 'prompt_tokens', operator: 'gte', value: [2642] }],
+      sort_by: 'error_count',
+      environment: 'prod',
+    }));
+
+    const { path, query, body } = call();
+    expect(path).toBe('/api/request-logs/groups/');
+    expect(query).toMatchObject({ group_by: 'customer_identifier', sort_by: 'error_count', environment: 'prod', page: '1', page_size: '20' });
+    expect(query.start_time).toBe('2026-10-10T08:00:00.000Z');
+    expect(body).toEqual({ filters: { prompt_tokens: { operator: 'gte', value: [2642] } } });
+    expect(result).toMatchObject({ group_by: 'customer_identifier', returned: 1, has_more: false });
+    expect(result.groups).toEqual([{
+      customer_identifier: 'initech_user_3', name: 'Initech', number_of_requests: 10, error_count: 2, error_percentage: 20,
+      total_cost: 0.5, total_prompt_tokens: 28000, total_completion_tokens: 900, average_latency: 4.2,
+    }]);
+  });
+
+  it('reports more pages when the backend links a next page', async () => {
+    const { client } = fakeClient({ results: [{ model: 'gpt-4o', number_of_requests: 5 }], next: 'https://x/?page=2' });
+    const { log_groups } = captureTools(client);
+
+    const result = parsed(await log_groups.handler({ group_by: 'model', page_size: 1 }));
+
+    expect(result.has_more).toBe(true);
+    expect(result.groups).toEqual([{ model: 'gpt-4o', number_of_requests: 5 }]);
+  });
+
+  it('never offers API key grouping, whose key is the stored key hash', () => {
+    const { log_groups } = captureTools(null);
+    const groupBy = (log_groups.config.inputSchema as any).group_by;
+    expect(groupBy.safeParse('organization_key_id').success).toBe(false);
+    expect(groupBy.safeParse('customer_identifier').success).toBe(true);
   });
 });
 

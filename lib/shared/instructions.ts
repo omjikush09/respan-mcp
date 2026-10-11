@@ -10,7 +10,7 @@
 export const SERVER_INSTRUCTIONS = `Respan is an LLM observability platform. These tools read and manage the user's own Respan project: production logs (single LLM requests and spans), traces (agent runs), threads (conversations), metrics, flagged behaviors and errors, and the prompts, datasets, evaluators, experiments and monitors built on them.
 
 For questions about production traffic, go from summary to rows to detail:
-1. Totals first: log_summary, trace_summary, thread_summary or dashboard_llm_metrics_summary give counts, cost, tokens, latency and failures for a window. List results have no total, so never count rows to answer "how many".
+1. Totals first: log_summary, trace_summary, thread_summary or dashboard_llm_metrics_summary give counts, cost, tokens, latency and failures for a window. List results have no total, so never count rows to answer "how many". For a breakdown by model, provider, customer or prompt, log_groups gives one row per value in one call.
 2. Then examples: log_list, trace_list or thread_list, with filters, newest first. Unsure of a log field or value, or asked for something vague like "slow" or "expensive"? log_filter_schema lists every log filter with this project's own values and percentiles.
 3. Then one record in full: log_get, trace_get or thread_get.
 Lists default to the last 24 hours; pass start_time and end_time (ISO 8601) for other windows. Keep paging while has_more is true. When a page reports truncated, it says what was cut and how to get the rest.
