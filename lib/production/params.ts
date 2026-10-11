@@ -78,8 +78,11 @@ export const FILTER_OPERATORS = [
   "contains",
   "icontains",
   "startswith",
+  "not_startswith",
   "endswith",
   "isnull",
+  "empty",
+  "not_empty",
 ] as const;
 
 export function filterConditionSchema(fieldDescription: string) {
@@ -87,7 +90,7 @@ export function filterConditionSchema(fieldDescription: string) {
     field: z.string().describe(fieldDescription),
     operator: z
       .enum(FILTER_OPERATORS)
-      .describe("'' = equals, 'not' = not equal, 'in' = any of the values, 'lt'/'lte'/'gt'/'gte' = comparisons, 'icontains' = case-insensitive substring, 'isnull' = null check."),
+      .describe("'' = equals, 'not' = not equal, 'in' = any of the values, 'lt'/'lte'/'gt'/'gte' = comparisons, 'icontains' = case-insensitive substring, 'empty'/'not_empty' = has no value / has a value. log_filter_schema lists which operators each field takes."),
     value: z
       .array(z.union([z.string(), z.number(), z.boolean()]))
       .describe("Value(s) as an array, e.g. [5], ['gpt-4o'], [true]."),

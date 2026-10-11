@@ -94,7 +94,7 @@ Defaults to the last 24 hours. The result has no total count: for totals over a 
         prompt_name: z.string().optional().describe("Only requests made with this saved prompt."),
         filters: z
           .array(filterConditionSchema(
-            "Log field, e.g. latency, cost, prompt_tokens, provider_id, span_name, error_message. Custom metadata uses 'metadata__<key>'.",
+            "Log field, e.g. latency, cost, prompt_tokens, provider_id, span_name, error_message, or 'metadata__<key>' for custom metadata. log_filter_schema lists the fields with their operators, this project's values and percentiles.",
           ))
           .optional()
           .describe("Advanced: extra conditions on any log field, all of which must match. Example: [{\"field\": \"latency\", \"operator\": \"gt\", \"value\": [5]}]."),

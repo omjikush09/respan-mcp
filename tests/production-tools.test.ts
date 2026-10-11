@@ -65,6 +65,7 @@ describe('production tool surface', () => {
       'dashboard_llm_metrics_summary',
       'dashboard_top_models',
       'end_user_rank_by_usage',
+      'log_filter_schema',
       'log_get',
       'log_list',
       'log_summary',
@@ -372,6 +373,34 @@ describe('metric tools', () => {
     const { query, body } = call();
     expect(query).toMatchObject({ breakdown_by: 'customer_identifier', sort_by: 'number_of_requests', limit: '10' });
     expect(body).toEqual({ filters: { model: { operator: 'icontains', value: 'claude' } } });
+  });
+});
+
+describe('log_filter_schema', () => {
+  it('reads the backend filter schema with a GET and passes the environment', async () => {
+    const schema = {
+      filters: [{ metric: 'latency', name: 'Generation', type: 'number', operators: ['lte', '', 'gte'],
+        percentiles: { p50: 1.2, p90: 4.4 }, measured_rows: 900, measured_over: "log_type = 'chat'" }],
+      operators: { gte: 'greater than or equal' },
+      measurements: { is_measured: true },
+    };
+    const { client, call } = fakeClient(schema);
+    const { log_filter_schema } = captureTools(client);
+
+    const result = parsed(await log_filter_schema.handler({ environment: 'prod' }));
+
+    expect(call()).toMatchObject({ path: '/api/request-logs/filter-schema/', method: 'GET', query: { environment: 'prod' } });
+    expect(call().body).toBeUndefined();
+    expect(result).toEqual(schema);
+  });
+
+  it('sends no environment when none is asked for', async () => {
+    const { client, call } = fakeClient({ filters: [], operators: {}, measurements: { is_measured: false } });
+    const { log_filter_schema } = captureTools(client);
+
+    await log_filter_schema.handler({});
+
+    expect(call().query).toEqual({});
   });
 });
 
