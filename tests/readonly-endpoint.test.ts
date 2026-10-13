@@ -6,6 +6,7 @@ import { loadOAuthConfig, resetOAuthConfigForTests } from '../lib/oauth/config.j
 import { InMemorySessionStore } from '../lib/oauth/memory-store.js';
 import { resetSessionStoreForTests, setSessionStoreForTests } from '../lib/oauth/store-factory.js';
 import readOnlyHandler from '../api/mcp/readonly.js';
+import enterpriseReadOnlyHandler from '../api/mcp/enterprise-readonly.js';
 import { createMcpHandler } from '../lib/shared/mcp-handler.js';
 import readOnlyResourceMetadata from '../api/well-known/oauth-protected-resource-readonly.js';
 import enterpriseReadOnlyResourceMetadata from '../api/well-known/oauth-protected-resource-enterprise-readonly.js';
@@ -101,8 +102,16 @@ describe('/mcp/readonly with an API key', () => {
     const error = JSON.parse(result.content[0].text).error;
     expect(error.code).toBe('insufficient_scope');
     expect(error.hint).toContain('/mcp/readonly');
+    expect(error.required_scope).toBeUndefined();
     expect(result._meta).toBeUndefined();
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('filters the enterprise read-only URL too', async () => {
+    setSessionStoreForTests(new InMemorySessionStore());
+    const names = await toolNames(enterpriseReadOnlyHandler, API_KEY, '/mcp/enterprise/readonly');
+    expect(names).toContain('log_list');
+    expect(names).not.toContain('prompt_deploy');
   });
 
   it('leaves /mcp unfiltered for the same key', async () => {
@@ -157,6 +166,16 @@ describe('/mcp/readonly with OAuth', () => {
     expect(onFullUrl).not.toContain('prompt_deploy');
   });
 
+  it('narrows an enterprise read-only sign-in the same way', async () => {
+    const broker = new OAuthBroker({ config: loadOAuthConfig(process.env), store: new InMemorySessionStore() });
+    const started = await broker.startAuthorization({
+      realm: 'enterprise', clientId: 'enc_client', clientName: 'Enterprise read-only', redirectUri: REDIRECT,
+      clientState: 'state', codeChallenge: CHALLENGE, resource: 'https://mcp.respan.ai/mcp/enterprise/readonly',
+    });
+    expect(started.transaction.resource).toBe('https://mcp.respan.ai/mcp/enterprise');
+    expect(started.transaction.requestedScope).toBe('mcp:read');
+  });
+
   it('accepts the read-only resource when refreshing', async () => {
     const store = new InMemorySessionStore();
     const config = loadOAuthConfig(process.env);
@@ -181,6 +200,69 @@ describe('/mcp/readonly with OAuth', () => {
       refreshToken: pair.refresh_token, clientId: 'enc_client', resource: 'https://mcp.respan.ai/mcp/readonly',
     });
     expect(refreshed.scope).toBe('mcp:read');
+  });
+});
+
+async function writeGrant(broker: OAuthBroker) {
+  const started = await broker.startAuthorization({
+    realm: 'platform', clientId: 'enc_client', clientName: 'Write grant', redirectUri: REDIRECT,
+    clientState: 'state', codeChallenge: CHALLENGE, resource: 'https://mcp.respan.ai/mcp',
+  });
+  await broker.approveAuthorization('platform', started.transactionToken, started.browserCsrf, undefined, true);
+  const redirect = await broker.completeAuthorization({
+    realm: 'platform', transactionToken: started.transactionToken, browserCsrf: started.browserCsrf,
+    backendAccessJwt: jwt('access'), backendRefreshJwt: jwt('refresh'),
+  });
+  return new URL(redirect).searchParams.get('code')!;
+}
+
+describe('/mcp/readonly never yields a write token', () => {
+  it('refuses to exchange a write code for the read-only resource', async () => {
+    const store = new InMemorySessionStore();
+    const broker = new OAuthBroker({ config: loadOAuthConfig(process.env), store });
+    const code = await writeGrant(broker);
+    await expect(broker.exchangeAuthorizationCode({
+      code, codeVerifier: VERIFIER, clientId: 'enc_client', redirectUri: REDIRECT,
+      resource: 'https://mcp.respan.ai/mcp/readonly',
+    })).rejects.toMatchObject({ oauthError: 'invalid_grant' });
+  });
+
+  it('refuses to refresh a write session for the read-only resource', async () => {
+    const store = new InMemorySessionStore();
+    const backendRefresh = vi.fn();
+    const broker = new OAuthBroker({ config: loadOAuthConfig(process.env), store, fetch: backendRefresh });
+    const pair = await broker.exchangeAuthorizationCode({
+      code: await writeGrant(broker), codeVerifier: VERIFIER, clientId: 'enc_client', redirectUri: REDIRECT,
+    });
+    expect(pair.scope).toBe('mcp:read mcp:write');
+    await expect(broker.refresh({
+      refreshToken: pair.refresh_token, clientId: 'enc_client', resource: 'https://mcp.respan.ai/mcp/readonly',
+    })).rejects.toMatchObject({ oauthError: 'invalid_grant' });
+    expect(backendRefresh).not.toHaveBeenCalled();
+
+    // The write session survives on /mcp.
+    const full = createMcpHandler('https://api.respan.ai', '/.well-known/oauth-protected-resource', 'platform');
+    setSessionStoreForTests(store);
+    expect(await toolNames(full, pair.access_token, '/mcp')).toContain('prompt_deploy');
+  });
+
+  it('challenges for read scope only on the read-only URL', async () => {
+    setSessionStoreForTests(new InMemorySessionStore());
+    const saved = process.env.RESPAN_API_KEY;
+    delete process.env.RESPAN_API_KEY;
+    try {
+      const request = rpc('', 'tools/list', {});
+      delete request.headers.authorization;
+      const response = new MockResponse();
+      await readOnlyHandler(request, response as any);
+      expect(response.statusCode).toBe(401);
+      expect(response.getHeader('www-authenticate')).toBe(
+        'Bearer scope="mcp:read", resource_metadata='
+          + '"https://mcp.respan.ai/.well-known/oauth-protected-resource/mcp/readonly"',
+      );
+    } finally {
+      if (saved !== undefined) process.env.RESPAN_API_KEY = saved;
+    }
   });
 });
 
@@ -211,6 +293,13 @@ describe('/mcp/readonly discovery and routing', () => {
       .toBe('/api/well-known/oauth-protected-resource-readonly');
     expect(route('/.well-known/oauth-protected-resource/mcp/enterprise/readonly'))
       .toBe('/api/well-known/oauth-protected-resource-enterprise-readonly');
-    expect(vercel.functions['api/mcp/readonly.ts']).toBeDefined();
+    for (const fn of [
+      'api/mcp/readonly.ts',
+      'api/mcp/enterprise-readonly.ts',
+      'api/well-known/oauth-protected-resource-readonly.ts',
+      'api/well-known/oauth-protected-resource-enterprise-readonly.ts',
+    ]) {
+      expect(vercel.functions[fn], fn).toBeDefined();
+    }
   });
 });

@@ -14,7 +14,6 @@ export type RealmConfig = {
    * `resource` with read scope only, so they stay read-only on either URL.
    */
   readOnlyResource: string;
-  readOnlyResourceMetadataPath: string;
   backendBaseUrl: string;
 };
 
@@ -126,7 +125,6 @@ export function loadOAuthConfig(
         authorizationPath: '/authorize',
         resourceMetadataPath: '/.well-known/oauth-protected-resource',
         readOnlyResource: `${publicBaseUrl}/mcp/readonly`,
-        readOnlyResourceMetadataPath: '/.well-known/oauth-protected-resource/mcp/readonly',
         backendBaseUrl: withoutTrailingSlash(values.RESPAN_API_BASE_URL),
       },
       enterprise: {
@@ -135,7 +133,6 @@ export function loadOAuthConfig(
         authorizationPath: '/authorize/enterprise',
         resourceMetadataPath: '/.well-known/oauth-protected-resource/enterprise',
         readOnlyResource: `${publicBaseUrl}/mcp/enterprise/readonly`,
-        readOnlyResourceMetadataPath: '/.well-known/oauth-protected-resource/mcp/enterprise/readonly',
         backendBaseUrl: withoutTrailingSlash(values.RESPAN_ENTERPRISE_API_BASE_URL),
       },
     },

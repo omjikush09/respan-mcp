@@ -10,7 +10,7 @@ import {
   securelyMatchesHash,
 } from './crypto.js';
 import { emitOAuthEvent } from './events.js';
-import { grantedScope, MCP_READ_SCOPE, requestedScope } from './scopes.js';
+import { grantedScope, hasWriteScope, MCP_READ_SCOPE, requestedScope } from './scopes.js';
 import { InvalidAccessTokenError, OAuthRequestError } from './errors.js';
 import {
   RECORD_VERSION,
@@ -180,7 +180,7 @@ export class OAuthBroker {
     // The read-only URL asks for read scope only, and its token is bound to
     // the canonical resource so it works on both URLs.
     const isReadOnlyResource = input.resource === realmConfig.readOnlyResource;
-    const resource = this.canonicalResource(input.realm, input.resource) || realmConfig.resource;
+    const resource = isReadOnlyResource ? realmConfig.resource : input.resource || realmConfig.resource;
     if (resource !== realmConfig.resource) {
       throw new OAuthRequestError('invalid_request', 400, 'Invalid OAuth resource');
     }
@@ -374,6 +374,10 @@ export class OAuthBroker {
     ) {
       throw new OAuthRequestError('invalid_grant', 400, 'Authorization code binding mismatch');
     }
+    if (this.isWriteGrantForReadOnlyResource(code.realm, input.resource, code.scope)) {
+      emitOAuthEvent('read_only_resource_refused', code.realm, codeHash);
+      throw new OAuthRequestError('invalid_grant', 400, 'Authorization code is not read-only');
+    }
     const records = tokenPairRecords(
       this.dependencies.config,
       code,
@@ -402,6 +406,19 @@ export class OAuthBroker {
   private canonicalResource(realm: OAuthRealm, resource: string | undefined): string | undefined {
     const realmConfig = this.dependencies.config.realms[realm];
     return resource === realmConfig.readOnlyResource ? realmConfig.resource : resource;
+  }
+
+  /**
+   * A token asked for on the read-only URL must be read-only. Grants that can
+   * write (or predate scopes) are refused rather than narrowed.
+   */
+  private isWriteGrantForReadOnlyResource(
+    realm: OAuthRealm,
+    resource: string | undefined,
+    scope: string | undefined,
+  ): boolean {
+    if (resource !== this.dependencies.config.realms[realm].readOnlyResource) return false;
+    return scope === undefined || hasWriteScope(scope);
   }
 
   private async findAuthorizationCode(codeHash: string) {
@@ -489,6 +506,11 @@ export class OAuthBroker {
         record.currentAccessTokenHash,
       );
       throw new OAuthRequestError('invalid_grant', 400, 'Invalid refresh token');
+    }
+    // Refused, but the session is kept: it is still valid on /mcp.
+    if (this.isWriteGrantForReadOnlyResource(realm, input.resource, record.scope)) {
+      emitOAuthEvent('read_only_resource_refused', realm, refreshTokenHash);
+      throw new OAuthRequestError('invalid_grant', 400, 'Refresh token is not read-only');
     }
     const lockOwner = randomBytes(32).toString('base64url');
     const isLocked = await this.dependencies.store.acquireRefreshLock(

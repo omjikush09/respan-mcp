@@ -77,15 +77,18 @@ function canonicalPublicBaseUrl(): string {
   return (process.env.MCP_PUBLIC_BASE_URL || 'https://mcp.respan.ai').replace(/\/+$/, '');
 }
 
-function challenge(resourceMetadataPath: string): string {
-  return `Bearer resource_metadata="${canonicalPublicBaseUrl()}${resourceMetadataPath}"`;
+function challenge(resourceMetadataPath: string, scope?: string): string {
+  const scopeParam = scope ? `scope="${scope}", ` : '';
+  return `Bearer ${scopeParam}resource_metadata="${canonicalPublicBaseUrl()}${resourceMetadataPath}"`;
 }
 
+/** `scope` is set on a read-only URL, so a client asks for read scope only. */
 function sendUnauthorized(
   res: VercelResponse,
   resourceMetadataPath: string,
+  scope?: string,
 ): VercelResponse {
-  res.setHeader('WWW-Authenticate', challenge(resourceMetadataPath));
+  res.setHeader('WWW-Authenticate', challenge(resourceMetadataPath, scope));
   return res.status(401).json({
     jsonrpc: '2.0',
     error: { code: -32001, message: 'Unauthorized' },
@@ -121,10 +124,13 @@ function insufficientScopeResult(
     message: `${toolName} changes data, and this connection is read-only.`,
     hint: readOnlyEndpointPath
       ? `This server URL (${readOnlyEndpointPath}) only serves read-only tools. `
-        + 'Connect to the same URL without /readonly to use tools that change data.'
+        + 'To change data, the user must connect to the same URL without /readonly, '
+        + 'with an API key that can write or a new sign-in that ticks "Also allow changes". '
+        + 'Read-only tools keep working here.'
       : 'Ask the user to reconnect Respan and tick "Also allow changes" on the '
         + 'consent page. Read-only tools keep working without it.',
-    required_scope: MCP_WRITE_SCOPE,
+    // No scope enables writes on a read-only URL.
+    ...(readOnlyEndpointPath ? {} : { required_scope: MCP_WRITE_SCOPE }),
   };
   const scope = `${MCP_READ_SCOPE} ${MCP_WRITE_SCOPE}`;
   return {
@@ -204,6 +210,7 @@ export function createMcpHandler(
   realm: OAuthRealm,
   options: McpHandlerOptions = {},
 ) {
+  const challengeScope = options.readOnlyEndpointPath ? MCP_READ_SCOPE : undefined;
   return async function handler(req: VercelRequest, res: VercelResponse) {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, s-maxage=0');
     res.setHeader('CDN-Cache-Control', 'no-store');
@@ -241,11 +248,11 @@ export function createMcpHandler(
         backendCredential = oauthAccess.backendAccessJwt;
         baseUrl = sdkBackendBaseUrl(config.realms[realm].backendBaseUrl);
       } else if (bearer?.startsWith('mcp_')) {
-        return sendUnauthorized(res, resourceMetadataPath);
+        return sendUnauthorized(res, resourceMetadataPath, challengeScope);
       } else {
         backendCredential = bearer || process.env.RESPAN_API_KEY;
         if (!backendCredential) {
-          return sendUnauthorized(res, resourceMetadataPath);
+          return sendUnauthorized(res, resourceMetadataPath, challengeScope);
         }
         const configuredBaseUrl = (
           realm === 'enterprise'
@@ -315,7 +322,7 @@ export function createMcpHandler(
           realm,
           oauthAccess.accessTokenHash,
         );
-        return sendUnauthorized(res, resourceMetadataPath);
+        return sendUnauthorized(res, resourceMetadataPath, challengeScope);
       }
       sendWebResponse(bufferedResponse, res);
     } catch (error) {
@@ -323,7 +330,7 @@ export function createMcpHandler(
         error instanceof InvalidAccessTokenError
         || (error instanceof Error && error.name === 'ZodError')
       ) {
-        return sendUnauthorized(res, resourceMetadataPath);
+        return sendUnauthorized(res, resourceMetadataPath, challengeScope);
       }
       if (error instanceof DisallowedBackendUrlError) {
         return res.status(400).json({

@@ -105,6 +105,12 @@
     "api/well-known/oauth-protected-resource-enterprise.ts": {
       "maxDuration": 10
     },
+    "api/well-known/oauth-protected-resource-readonly.ts": {
+      "maxDuration": 10
+    },
+    "api/well-known/oauth-protected-resource-enterprise-readonly.ts": {
+      "maxDuration": 10
+    },
     "api/well-known/oauth-authorization-server.ts": {
       "maxDuration": 10
     },
