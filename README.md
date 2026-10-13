@@ -263,13 +263,13 @@ If a tool this server registers was renamed or removed in the backend, startup f
 
 The hosted endpoints (`/mcp`, `/mcp/enterprise`, `/mcp/docs`) write one JSON line to stdout for each of these events. On Vercel the lines land in the runtime logs (`lib/shared/telemetry.ts`).
 
-| `evt` | When | Main fields |
+| `event` | When | Main fields |
 |---|---|---|
-| `mcp.tool_call` | Every tool call, and every call to a tool this server does not have | `tool`, `status` (`ok`, `tool_error`, `exception`, `unknown_tool`), `latency_ms`, `result_chars`, `arg_keys`, `http_status`, `error_class` |
-| `mcp.session_init` | `initialize` | `client_name`, `client_version`, `requested_protocol_version` |
-| `mcp.tool_alias` | A call that used an old tool name | `old_names` |
+| `mcp.tool_call` | Every well-formed `tools/call`, including calls whose arguments fail the tool's input schema and calls to a tool this server does not have (a request the SDK rejects as malformed JSON-RPC, such as non-object `arguments`, is not a tool call and is not logged) | `tool`, `status` (`ok`, `tool_error`, `exception`, `invalid_arguments`, `unknown_tool`), `latency_ms`, `result_chars`, `arg_keys` (the names the client sent), `http_status`, `error_class` |
+| `mcp.session_init` | An `initialize` the server completed | `client_name`, `client_version`, `requested_protocol_version` |
+| `mcp.tool_alias` | A request whose `tools/call` used an old tool name (old names in the `Respan-Enabled-Tools` header are not counted) | `old_names` |
 
-Every line also carries `realm`, `auth_kind` (`oauth`, `jwt`, `api_key`, `env`, `none`), `user_agent`, `protocol_version` and `session_key`. The `session_key` is the first 12 hex characters of the SHA-256 of the bearer, so one client's stateless calls can be grouped together.
+Every line also carries `realm`, `auth_kind` (`oauth`, `jwt`, `api_key`, `env`, `none`), `user_agent`, `protocol_version` and, when there is a bearer, `session_key`. The `session_key` is the first 12 hex characters of a SHA-256 of the bearer under a fixed telemetry prefix, so the stateless calls made with one credential can be grouped together but the key cannot be matched against the token hashes the OAuth session store keeps. It changes when an OAuth or JWT token is refreshed, and `/mcp/docs`, which takes no credential, logs none. One request writes at most 50 `mcp.tool_call` lines, and name lists are capped at 32 entries.
 
 Argument values, tool results and credentials are never logged. stdio is not instrumented, because there stdout carries the protocol and the process runs on the user's machine.
 

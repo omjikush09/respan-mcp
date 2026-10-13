@@ -33,7 +33,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     });
     applyToolPolicy(server);
     // The docs server needs no credential, so every caller counts as 'none'.
-    const telemetry = { ...telemetryContext('docs', undefined, req.headers), authKind: 'none' as const };
+    const telemetry = telemetryContext('docs', undefined, req.headers, false);
     instrumentToolCalls(server, telemetry);
 
     registerDocTools(server);
@@ -45,12 +45,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     await server.connect(transport);
 
     const renamedTools = rewriteToolCallNames(req.body);
-    recordRequest(server, telemetry, req.body, renamedTools);
     await transport.handleRequest(
       req as any,
       res as any,
       req.body,
     );
+    recordRequest(server, telemetry, req.body, renamedTools, res.statusCode < 400);
   } catch (error) {
     console.error('Docs MCP Handler error:', error);
 

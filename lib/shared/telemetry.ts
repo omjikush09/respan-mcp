@@ -6,14 +6,16 @@
 //
 // What is never logged: argument values, tool results, credentials. A call
 // carries only the argument names, sizes, timings and status codes. A hashed
-// credential prefix (session_key) ties the calls of one stateless client
-// together without identifying who it is.
+// credential (session_key) ties the calls of one stateless client together.
+// It is hashed under its own prefix, so it cannot be matched against the
+// token hashes the OAuth session store keeps.
 //
 // stdio is not instrumented: there stdout is the MCP protocol stream, and the
 // process runs on the customer's machine, where nobody collects these lines.
 
 import { createHash } from 'node:crypto';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
 export const TOOL_CALL_EVENT = 'mcp.tool_call';
 export const SESSION_INIT_EVENT = 'mcp.session_init';
@@ -22,12 +24,22 @@ const EVENT_SCHEMA_VERSION = 1;
 
 /** Bounds every client-supplied string we echo into a log line. */
 const MAX_LOGGED_STRING_CHARS = 128;
+/** Bounds the argument names and old tool names one line can carry. */
+const MAX_LOGGED_NAMES = 32;
+/** Bounds the tool_call lines one request (one server instance) can write. */
+const MAX_TOOL_CALL_EVENTS_PER_SERVER = 50;
 const SESSION_KEY_HEX_CHARS = 12;
-const HTTP_STATUS_PREFIX = /^(\d{3})\b/;
+const SESSION_KEY_DOMAIN = 'respan-mcp-telemetry-session-key\0';
+const MIN_HTTP_STATUS = 100;
+const MAX_HTTP_STATUS = 599;
 const JWT_SHAPE = /^[\w-]+\.[\w-]+\.[\w-]+$/;
 
 export type AuthKind = 'oauth' | 'jwt' | 'api_key' | 'env' | 'none';
-export type ToolCallStatus = 'ok' | 'tool_error' | 'exception' | 'unknown_tool';
+/**
+ * `invalid_arguments`: the tool exists but the SDK rejected the call before
+ * running it, almost always because the arguments failed the input schema.
+ */
+export type ToolCallStatus = 'ok' | 'tool_error' | 'exception' | 'unknown_tool' | 'invalid_arguments';
 
 export interface TelemetryContext {
   /** Which hosted server: platform, enterprise or docs. */
@@ -51,15 +63,25 @@ interface ToolCallFields {
 
 const COMMIT = (process.env.VERCEL_GIT_COMMIT_SHA ?? '').slice(0, 7) || undefined;
 
-const registeredNames = new WeakMap<McpServer, Set<string>>();
+/** What the wrapped tool callback saw, keyed by the request's `extra` object. */
+interface CallRecord {
+  ran: boolean;
+  threw: boolean;
+  error?: unknown;
+}
+const callRecords = new WeakMap<object, CallRecord>();
 
 function bounded(value: unknown): string | undefined {
   return typeof value === 'string' && value ? value.slice(0, MAX_LOGGED_STRING_CHARS) : undefined;
 }
 
+function boundedNames(values: unknown[]): string[] {
+  return values.slice(0, MAX_LOGGED_NAMES).map((value) => bounded(value) ?? '');
+}
+
 function emit(event: string, ctx: TelemetryContext, fields: object): void {
   console.info(JSON.stringify({
-    evt: event,
+    event,
     v: EVENT_SCHEMA_VERSION,
     ts: new Date().toISOString(),
     commit: COMMIT,
@@ -72,10 +94,18 @@ function emit(event: string, ctx: TelemetryContext, fields: object): void {
   }));
 }
 
-/** sha256 prefix of a credential, so one client's calls can be grouped. */
+/**
+ * A short hash of a credential, so one client's calls can be grouped. The
+ * domain prefix keeps it from being a prefix of hashOpaqueToken(credential),
+ * which the session store keys OAuth sessions by.
+ */
 export function sessionKeyOf(credential: string | undefined): string | undefined {
   if (!credential) return undefined;
-  return createHash('sha256').update(credential).digest('hex').slice(0, SESSION_KEY_HEX_CHARS);
+  return createHash('sha256')
+    .update(SESSION_KEY_DOMAIN)
+    .update(credential)
+    .digest('hex')
+    .slice(0, SESSION_KEY_HEX_CHARS);
 }
 
 /** How the caller authenticated, read from the bearer's shape only. */
@@ -85,139 +115,186 @@ export function authKindOf(bearer: string | undefined, hasEnvironmentKey: boolea
   return JWT_SHAPE.test(bearer) ? 'jwt' : 'api_key';
 }
 
+/** `hasEnvironmentKey` is false for a server that never uses RESPAN_API_KEY. */
 export function telemetryContext(
   realm: string,
   bearer: string | undefined,
   headers: Record<string, string | string[] | undefined>,
+  hasEnvironmentKey = Boolean(process.env.RESPAN_API_KEY),
 ): TelemetryContext {
   return {
     realm,
-    authKind: authKindOf(bearer, Boolean(process.env.RESPAN_API_KEY)),
+    authKind: authKindOf(bearer, hasEnvironmentKey),
     sessionKey: sessionKeyOf(bearer),
     userAgent: bounded(headers['user-agent']),
     protocolVersion: bounded(headers['mcp-protocol-version']),
   };
 }
 
+function lengthOf(value: unknown): number {
+  return typeof value === 'string' ? value.length : 0;
+}
+
+/** Characters of text, base64 data and embedded resources, without re-serializing them. */
 function resultChars(result: unknown): number | undefined {
   const content = (result as { content?: unknown })?.content;
   if (!Array.isArray(content)) return undefined;
-  return content.reduce((total: number, item: { type?: string; text?: unknown }) => (
-    total + (item?.type === 'text' && typeof item.text === 'string'
-      ? item.text.length
-      : JSON.stringify(item ?? null).length)
+  return content.reduce((total: number, item: { text?: unknown; data?: unknown; resource?: { text?: unknown; blob?: unknown } }) => (
+    total + lengthOf(item?.text) + lengthOf(item?.data) + lengthOf(item?.resource?.text) + lengthOf(item?.resource?.blob)
   ), 0);
 }
 
-/** The backend HTTP status behind a thrown error, when there is one. */
+function isHttpStatus(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) >= MIN_HTTP_STATUS && (value as number) <= MAX_HTTP_STATUS;
+}
+
+/**
+ * The backend HTTP status behind a thrown error, when there is one: rawFetch
+ * sets `status`, the Respan SDK sets `statusCode`. Messages are not parsed.
+ */
 export function httpStatusOf(error: unknown): number | undefined {
-  const candidate = error as { statusCode?: unknown; status?: unknown; message?: unknown };
+  const candidate = error as { statusCode?: unknown; status?: unknown };
   for (const value of [candidate?.statusCode, candidate?.status]) {
-    if (typeof value === 'number') return value;
+    if (isHttpStatus(value)) return value;
   }
-  const match = typeof candidate?.message === 'string' ? HTTP_STATUS_PREFIX.exec(candidate.message) : null;
-  return match ? Number(match[1]) : undefined;
+  return undefined;
 }
 
 function errorClassOf(error: unknown): string | undefined {
   return bounded((error as { name?: unknown })?.name) ?? bounded(error?.constructor?.name);
 }
 
-/**
- * The SDK calls a tool callback as cb(args, extra) when the tool declares an
- * input schema and as cb(extra) when it does not. Only the first form carries
- * arguments, and only their names are kept.
- */
-function argKeysOf(callArgs: unknown[]): string[] | undefined {
-  if (callArgs.length < 2) return undefined;
-  const args = callArgs[0];
-  return args && typeof args === 'object' ? Object.keys(args).sort() : undefined;
+/** The argument names the client sent, before the input schema strips or defaults any. */
+function argKeysOf(args: unknown): string[] | undefined {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return undefined;
+  return boundedNames(Object.keys(args).sort());
 }
 
-function wrapCallback(name: string, callback: Function, ctx: TelemetryContext): Function {
+/**
+ * The SDK calls a tool callback as cb(args, extra) or cb(extra); either way
+ * `extra` comes last and is the object the tools/call handler received. The
+ * wrapper only notes that the callback ran and what it threw; the event is
+ * written once, by the handler wrapper below.
+ */
+function wrapCallback(callback: Function): Function {
   return async function instrumented(this: unknown, ...callArgs: unknown[]) {
-    const started = performance.now();
-    const argKeys = argKeysOf(callArgs);
-    const latency = () => Math.round(performance.now() - started);
+    const extra = callArgs[callArgs.length - 1];
+    const record = extra && typeof extra === 'object' ? callRecords.get(extra) : undefined;
+    if (record) record.ran = true;
     try {
-      const result = await callback.apply(this, callArgs);
-      emit(TOOL_CALL_EVENT, ctx, {
-        tool: name,
-        status: (result as { isError?: unknown })?.isError ? 'tool_error' : 'ok',
-        latency_ms: latency(),
-        result_chars: resultChars(result),
-        arg_keys: argKeys,
-      } satisfies ToolCallFields);
-      return result;
+      return await callback.apply(this, callArgs);
     } catch (error) {
-      emit(TOOL_CALL_EVENT, ctx, {
-        tool: name,
-        status: 'exception',
-        latency_ms: latency(),
-        arg_keys: argKeys,
-        http_status: httpStatusOf(error),
-        error_class: errorClassOf(error),
-      } satisfies ToolCallFields);
+      if (record) {
+        record.threw = true;
+        record.error = error;
+      }
       throw error;
     }
   };
 }
 
+function statusOf(name: string, names: Set<string>, record: CallRecord, result: unknown): ToolCallStatus {
+  if (record.threw) return 'exception';
+  const isError = Boolean((result as { isError?: unknown })?.isError);
+  if (!record.ran && isError) return names.has(name) ? 'invalid_arguments' : 'unknown_tool';
+  return isError ? 'tool_error' : 'ok';
+}
+
 /**
- * Wraps the callback of every tool registered on `server` from here on, via
- * both `server.tool` and `server.registerTool`. Apply it after any patch that
- * filters registrations, so only tools that really registered are recorded.
+ * Logs one event per `tools/call` this server answers: calls that ran, calls
+ * the SDK rejected for bad arguments, and calls to tools it does not have.
+ * Call it before any tool is registered. It installs the SDK's tools/call
+ * handler at once (so a server left with no tools still answers, and logs,
+ * calls to unknown tools) wrapped in the logger, and wraps the callback of every tool
+ * registered through `server.tool` or `server.registerTool` from here on (so
+ * apply it after any patch that filters registrations).
  */
 export function instrumentToolCalls(server: McpServer, ctx: TelemetryContext): void {
+  if ((server as any)._toolHandlersInitialized) {
+    throw new Error('instrumentToolCalls must run before any tool is registered');
+  }
   const names = new Set<string>();
-  registeredNames.set(server, names);
+  let emitted = 0;
+
   for (const method of ['tool', 'registerTool'] as const) {
     const original = (server as any)[method].bind(server);
     (server as any)[method] = function (name: string, ...rest: unknown[]) {
       const last = rest.length - 1;
       if (typeof rest[last] === 'function') {
-        rest[last] = wrapCallback(name, rest[last] as Function, ctx);
+        rest[last] = wrapCallback(rest[last] as Function);
       }
       const registered = original(name, ...rest);
       if (registered) names.add(name);
       return registered;
     };
   }
+
+  const lowLevel = server.server;
+  const originalSetRequestHandler = lowLevel.setRequestHandler.bind(lowLevel);
+  (lowLevel as any).setRequestHandler = function (schema: unknown, handler: Function) {
+    if (schema !== CallToolRequestSchema) return originalSetRequestHandler(schema as any, handler as any);
+    return originalSetRequestHandler(CallToolRequestSchema, async (request: any, extra: any) => {
+      const started = performance.now();
+      const record: CallRecord = { ran: false, threw: false };
+      callRecords.set(extra, record);
+      const name = String(request?.params?.name ?? '');
+      const log = (fields: Partial<ToolCallFields>) => {
+        if (emitted >= MAX_TOOL_CALL_EVENTS_PER_SERVER) return;
+        emitted += 1;
+        emit(TOOL_CALL_EVENT, ctx, {
+          tool: bounded(name) ?? '',
+          latency_ms: Math.round(performance.now() - started),
+          arg_keys: argKeysOf(request?.params?.arguments),
+          ...fields,
+        });
+      };
+      try {
+        const result = await handler(request, extra);
+        const status = statusOf(name, names, record, result);
+        log(status === 'exception'
+          ? { status, http_status: httpStatusOf(record.error), error_class: errorClassOf(record.error) }
+          : { status, result_chars: status === 'ok' || status === 'tool_error' ? resultChars(result) : undefined });
+        return result;
+      } catch (error) {
+        log({ status: 'exception', http_status: httpStatusOf(error), error_class: errorClassOf(error) });
+        throw error;
+      } finally {
+        callRecords.delete(extra);
+      }
+    });
+  };
+  // SDK-internal; without it the handler still installs, wrapped, on the first registration.
+  const installToolHandlers = (server as any).setToolRequestHandlers;
+  if (typeof installToolHandlers === 'function') installToolHandlers.call(server);
 }
 
 /**
- * Logs what the SDK answers without calling any tool: `initialize`, which
- * names the client, and `tools/call` for a tool this server does not have.
- * `aliasedNames` are the old names the request used before they were rewritten.
+ * Logs what the request said outside of tool calls: the old tool names its
+ * tools/call messages used before they were rewritten, and `initialize`,
+ * which names the client. Call it after the transport has answered. A session
+ * is logged only when the server completed the handshake (it then knows the
+ * client) and the request was not refused afterwards (`isAccepted`).
  */
 export function recordRequest(
   server: McpServer,
   ctx: TelemetryContext,
   body: unknown,
-  aliasedNames: string[] = [],
+  aliasedNames: string[],
+  isAccepted: boolean,
 ): void {
-  const names = registeredNames.get(server);
-  const messages = Array.isArray(body) ? body : [body];
-  for (const message of messages) {
-    if (!message || typeof message !== 'object') continue;
-    const { method, params } = message as {
-      method?: unknown;
-      params?: { name?: unknown; clientInfo?: { name?: unknown; version?: unknown }; protocolVersion?: unknown };
-    };
-    if (method === 'initialize') {
-      emit(SESSION_INIT_EVENT, ctx, {
-        client_name: bounded(params?.clientInfo?.name),
-        client_version: bounded(params?.clientInfo?.version),
-        requested_protocol_version: bounded(params?.protocolVersion),
-      });
-    } else if (method === 'tools/call' && typeof params?.name === 'string' && names && !names.has(params.name)) {
-      emit(TOOL_CALL_EVENT, ctx, {
-        tool: bounded(params.name) ?? '',
-        status: 'unknown_tool',
-      } satisfies ToolCallFields);
-    }
+  const clientInfo = isAccepted ? server.server.getClientVersion() : undefined;
+  if (clientInfo) {
+    const messages = Array.isArray(body) ? body : [body];
+    const init = messages.find((message) => (message as { method?: unknown })?.method === 'initialize') as
+      | { params?: { protocolVersion?: unknown } }
+      | undefined;
+    emit(SESSION_INIT_EVENT, ctx, {
+      client_name: bounded(clientInfo.name),
+      client_version: bounded(clientInfo.version),
+      requested_protocol_version: bounded(init?.params?.protocolVersion),
+    });
   }
   if (aliasedNames.length > 0) {
-    emit(TOOL_ALIAS_EVENT, ctx, { old_names: aliasedNames.map((name) => bounded(name) ?? '') });
+    emit(TOOL_ALIAS_EVENT, ctx, { old_names: boundedNames(aliasedNames) });
   }
 }

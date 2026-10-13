@@ -232,12 +232,14 @@ export function createMcpHandler(
       });
       await server.connect(transport);
       const renamedTools = rewriteToolCallNames(req.body);
-      recordRequest(server, telemetry, req.body, renamedTools);
       const transportResponse = await transport.handleRequest(
         toWebRequest(req),
         { parsedBody: req.body },
       );
       const bufferedResponse = await bufferWebResponse(transportResponse);
+      // A revoked OAuth session turns the answer into the 401 challenge below.
+      const isAccepted = bufferedResponse.status < 400 && !(backendUnauthorized && oauthAccess);
+      recordRequest(server, telemetry, req.body, renamedTools, isAccepted);
 
       if (backendUnauthorized && oauthAccess) {
         await getSessionStore().deleteAccessSession(

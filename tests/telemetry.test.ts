@@ -4,6 +4,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createMcpHandler, createServer } from '../lib/shared/mcp-handler.js';
+import { hashOpaqueToken } from '../lib/oauth/crypto.js';
+import { rawFetch } from '../lib/shared/client.js';
 import {
   authKindOf,
   httpStatusOf,
@@ -55,7 +57,7 @@ function serverWithTools(): McpServer {
   server.registerTool(
     'throws_backend_error',
     { description: 'backend 404', inputSchema: { id: z.string() } },
-    async () => { throw new Error('404 Not Found: {"detail":"Trace not found"}'); },
+    async () => { throw Object.assign(new Error('404 Not Found: {"detail":"Trace not found"}'), { status: 404 }); },
   );
   server.registerTool(
     'throws_sdk_error',
@@ -73,7 +75,7 @@ describe('tool call telemetry', () => {
 
     const [event] = events();
     expect(event).toMatchObject({
-      evt: 'mcp.tool_call',
+      event: 'mcp.tool_call',
       v: 1,
       tool: 'echo',
       status: 'ok',
@@ -88,12 +90,43 @@ describe('tool call telemetry', () => {
     expect(JSON.stringify(info.mock.calls)).not.toContain('hello');
   });
 
-  it('logs no argument names for a tool without an input schema', async () => {
+  it('logs the argument names the client sent, not the ones the schema kept', async () => {
     const client = await connect(serverWithTools());
+    await client.callTool({ name: 'echo', arguments: { query: 'hello', limt: 5 } });
     await client.callTool({ name: 'no_args', arguments: {} });
     await client.close();
-    expect(events()[0]).toMatchObject({ tool: 'no_args', status: 'ok' });
-    expect(events()[0].arg_keys).toBeUndefined();
+    expect(events()).toEqual([
+      expect.objectContaining({ tool: 'echo', status: 'ok', arg_keys: ['limt', 'query'] }),
+      expect.objectContaining({ tool: 'no_args', status: 'ok', arg_keys: [] }),
+    ]);
+  });
+
+  it('logs a call whose arguments fail the input schema', async () => {
+    const client = await connect(serverWithTools());
+    const result = await client.callTool({ name: 'echo', arguments: { query: 42 } });
+    await client.close();
+    expect(result.isError).toBe(true);
+    expect(events()).toEqual([
+      expect.objectContaining({ tool: 'echo', status: 'invalid_arguments', arg_keys: ['query'] }),
+    ]);
+    expect(events()[0].result_chars).toBeUndefined();
+  });
+
+  it('logs a call to a tool the server does not have', async () => {
+    const client = await connect(serverWithTools());
+    const result = await client.callTool({ name: 'delete_everything', arguments: {} });
+    await client.close();
+    expect(result.isError).toBe(true);
+    expect(events()).toEqual([expect.objectContaining({ tool: 'delete_everything', status: 'unknown_tool' })]);
+  });
+
+  it('caps the tool_call lines one server writes', async () => {
+    const client = await connect(serverWithTools());
+    for (let i = 0; i < 60; i += 1) {
+      await client.callTool({ name: 'no_args', arguments: {} });
+    }
+    await client.close();
+    expect(events()).toHaveLength(50);
   });
 
   it('marks a result with isError as a tool error', async () => {
@@ -120,20 +153,35 @@ describe('tool call telemetry', () => {
   });
 
   it('instruments every tool on /mcp and treats filtered-out tools as unknown', async () => {
-    const server = createServer(null, new Set(['trace_list']), CTX);
-    recordRequest(server, CTX, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'log_list' } });
-    recordRequest(server, CTX, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'trace_list' } });
+    const client = await connect(createServer(null, new Set(['trace_list']), CTX));
+    await client.callTool({ name: 'log_list', arguments: {} });
+    await client.close();
     expect(events()).toEqual([expect.objectContaining({ tool: 'log_list', status: 'unknown_tool' })]);
   });
 
   it('logs old tool names as one alias event, not as extra calls', () => {
-    const server = createServer(null, undefined, CTX);
-    recordRequest(server, CTX, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'log_list' } }, ['list_logs']);
-    expect(events()).toEqual([expect.objectContaining({ evt: 'mcp.tool_alias', old_names: ['list_logs'] })]);
+    recordRequest(createServer(null), CTX, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'log_list' } }, ['list_logs'], false);
+    expect(events()).toEqual([expect.objectContaining({ event: 'mcp.tool_alias', old_names: ['list_logs'] })]);
+  });
+
+  it('logs calls on a server whose tool filter lets nothing through', async () => {
+    const client = await connect(createServer(null, new Set(['not_a_tool']), CTX));
+    const result = await client.callTool({ name: 'log_list', arguments: {} });
+    await client.close();
+    expect(result.isError).toBe(true);
+    expect(events()).toEqual([expect.objectContaining({ tool: 'log_list', status: 'unknown_tool' })]);
+  });
+
+  it('refuses to instrument a server that already has tools', () => {
+    const server = new McpServer({ name: 'test', version: '0.0.0' });
+    server.tool('early', 'registered first', async () => ({ content: [] }));
+    expect(() => instrumentToolCalls(server, CTX)).toThrow(/before any tool/);
   });
 
   it('leaves createServer uninstrumented without a telemetry context', async () => {
-    const client = await connect(createServer(null, new Set(['docs_search_missing'])));
+    const client = await connect(createServer(null, new Set(['trace_list'])));
+    await client.callTool({ name: 'trace_list', arguments: {} }).catch(() => undefined);
+    await client.callTool({ name: 'missing_tool', arguments: {} });
     await client.close();
     expect(info).not.toHaveBeenCalled();
   });
@@ -154,13 +202,29 @@ describe('telemetry helpers', () => {
     expect(sessionKeyOf('some-api-key')).toBe(key);
     expect(sessionKeyOf('another-key')).not.toBe(key);
     expect(sessionKeyOf(undefined)).toBeUndefined();
+    // Not a prefix of the hash the OAuth session store keys sessions by.
+    expect(hashOpaqueToken('mcp_at_token').startsWith(sessionKeyOf('mcp_at_token')!)).toBe(false);
   });
 
-  it('reads the HTTP status from SDK errors and from rawFetch messages', () => {
+  it('reads the HTTP status rawFetch attaches to its errors', async () => {
+    const client = {
+      auth: 'Bearer x',
+      baseUrl: 'https://api.respan.ai',
+      fetch: async () => new Response('{"detail":"nope"}', { status: 404, statusText: 'Not Found' }),
+    } as any;
+    const error = await rawFetch(client, '/api/traces/x').catch((thrown: unknown) => thrown);
+    expect(httpStatusOf(error)).toBe(404);
+  });
+
+  it('reads the HTTP status from SDK errors, never from a message', () => {
     expect(httpStatusOf({ statusCode: 403 })).toBe(403);
     expect(httpStatusOf({ status: 502 })).toBe(502);
-    expect(httpStatusOf(new Error('400 Bad Request: {}'))).toBe(400);
     expect(httpStatusOf(new Error('network down'))).toBeUndefined();
+    // A message that merely starts with a number is not a backend status.
+    expect(httpStatusOf(new Error('500 spans exceed the export limit: narrow the range'))).toBeUndefined();
+    expect(httpStatusOf({ status: 999 })).toBeUndefined();
+    expect(httpStatusOf({ status: 'failed' })).toBeUndefined();
+    expect(httpStatusOf({ status: 7 })).toBeUndefined();
   });
 });
 
@@ -204,7 +268,7 @@ describe('hosted handler telemetry', () => {
     }), new MockResponse() as any);
 
     expect(events()).toEqual([expect.objectContaining({
-      evt: 'mcp.session_init',
+      event: 'mcp.session_init',
       client_name: 'claude-code',
       client_version: '2.1.0',
       requested_protocol_version: '2025-11-25',
@@ -222,6 +286,39 @@ describe('hosted handler telemetry', () => {
       jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'delete_everything', arguments: {} },
     }), response as any);
 
-    expect(events()).toEqual([expect.objectContaining({ evt: 'mcp.tool_call', tool: 'delete_everything', status: 'unknown_tool' })]);
+    expect(events()).toEqual([expect.objectContaining({ event: 'mcp.tool_call', tool: 'delete_everything', status: 'unknown_tool' })]);
+  });
+
+  it('logs no session for a handshake the transport rejects', async () => {
+    const request = rpcRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'claude-code', version: '2.1.0' } },
+    });
+    request.headers.accept = 'text/html';
+    const response = new MockResponse();
+    await handler(request, response as any);
+
+    expect(response.statusCode).toBeGreaterThanOrEqual(400);
+    expect(events()).toEqual([]);
+  });
+
+  it('logs no session for an initialize the server answers with an error', async () => {
+    await handler(rpcRequest({
+      jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25' },
+    }), new MockResponse() as any);
+
+    expect(events()).toEqual([]);
+  });
+
+  it('logs old tool names even when the transport rejects the request', async () => {
+    const request = rpcRequest({
+      jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_logs', arguments: {} },
+    });
+    request.headers.accept = 'text/html';
+    await handler(request, new MockResponse() as any);
+
+    expect(events()).toEqual([expect.objectContaining({ event: 'mcp.tool_alias', old_names: ['list_logs'] })]);
   });
 });
