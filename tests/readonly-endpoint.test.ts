@@ -107,6 +107,25 @@ describe('/mcp/readonly with an API key', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it('explains a batch of write calls with the read-only-URL variant', async () => {
+    setSessionStoreForTests(new InMemorySessionStore());
+    const request = rpc(API_KEY, 'tools/call', {});
+    request.body = [
+      { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'dataset_delete', arguments: {} } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'prompt_deploy', arguments: {} } },
+    ];
+    const response = new MockResponse();
+    await readOnlyHandler(request, response as any);
+    expect(response.body).toHaveLength(2);
+    for (const { result } of response.body) {
+      const error = JSON.parse(result.content[0].text).error;
+      expect(error.code).toBe('insufficient_scope');
+      expect(error.hint).toContain('/mcp/readonly');
+      expect(error.required_scope).toBeUndefined();
+      expect(result._meta).toBeUndefined();
+    }
+  });
+
   it('filters the enterprise read-only URL too', async () => {
     setSessionStoreForTests(new InMemorySessionStore());
     const names = await toolNames(enterpriseReadOnlyHandler, API_KEY, '/mcp/enterprise/readonly');

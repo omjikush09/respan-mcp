@@ -132,6 +132,11 @@ describe('scope rules', () => {
     expect(requestedScope('mcp:read openid profile')).toBe('mcp:read');
   });
 
+  it('treats a scope with no supported value as a missing one', () => {
+    expect(requestedScope('claudeai')).toBe('mcp:read mcp:write');
+    expect(requestedScope('openid offline_access')).toBe('mcp:read mcp:write');
+  });
+
   it('grants write only when asked for and approved', () => {
     expect(grantedScope('mcp:read mcp:write', false)).toBe('mcp:read');
     expect(grantedScope('mcp:read mcp:write', true)).toBe('mcp:read mcp:write');
@@ -144,6 +149,8 @@ describe('scope rules', () => {
     expect(isReadOnlySession('mcp:read mcp:write', {})).toBe(false);
     expect(isReadOnlySession(undefined, {})).toBe(false);
     expect(isReadOnlySession(undefined, { [LEGACY_SCOPE_ENV]: 'read' })).toBe(true);
+    expect(isReadOnlySession(undefined, { [LEGACY_SCOPE_ENV]: 'mcp:read' })).toBe(true);
+    expect(isReadOnlySession(undefined, { [LEGACY_SCOPE_ENV]: '  ' })).toBe(false);
   });
 });
 
@@ -241,6 +248,51 @@ describe('scopes on the hosted /mcp endpoint', () => {
     expect(result._meta['mcp/www_authenticate'][0]).toContain('error="insufficient_scope"');
     expect(result._meta['mcp/www_authenticate'][0]).toContain('scope="mcp:read mcp:write"');
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('refuses a write tool called by its old name with insufficient_scope', async () => {
+    const store = new InMemorySessionStore();
+    setSessionStoreForTests(store);
+    const { pair } = await issue(store, { isWriteApproved: false });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const response = new MockResponse();
+    await handler(rpc(pair.access_token, 'tools/call', { name: 'deploy_prompt_version', arguments: {} }), response as any);
+
+    expect(JSON.parse(rpcResult(response).result.content[0].text).error.code).toBe('insufficient_scope');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('answers a batch of hidden write tool calls with insufficient_scope for each', async () => {
+    const store = new InMemorySessionStore();
+    setSessionStoreForTests(store);
+    const { pair } = await issue(store, { isWriteApproved: false });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const request = rpc(pair.access_token, 'tools/call', {});
+    request.body = [
+      { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'prompt_deploy', arguments: {} } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'dataset_delete', arguments: {} } },
+    ];
+    const response = new MockResponse();
+    await handler(request, response as any);
+
+    const results = response.body as any[];
+    expect(results.map((r) => r.id)).toEqual([1, 2]);
+    for (const r of results) {
+      expect(JSON.parse(r.result.content[0].text).error.code).toBe('insufficient_scope');
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not answer an id-less tools/call with a scope result', async () => {
+    const store = new InMemorySessionStore();
+    setSessionStoreForTests(store);
+    const { pair } = await issue(store, { isWriteApproved: false });
+    const request = rpc(pair.access_token, 'tools/call', { name: 'prompt_deploy', arguments: {} });
+    delete request.body.id;
+    const response = new MockResponse();
+    await handler(request, response as any);
+
+    expect(String(JSON.stringify(response.body ?? '')).includes('insufficient_scope')).toBe(false);
   });
 
   it('shows write tools to a session that was allowed changes', async () => {

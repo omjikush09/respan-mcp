@@ -212,6 +212,10 @@ async function authorizeWithConsent(input: {
       enterprise: isEnterprise,
     }),
   }));
+  assert(
+    typeof approved.redirect_url === 'string',
+    `Consent login failed: ${JSON.stringify(approved.error ?? approved)}`,
+  );
   const code = required(new URL(approved.redirect_url).searchParams.get('code') || undefined, 'authorization code');
   const exchanged = await fetch(input.metadata.token_endpoint, {
     method: 'POST',
@@ -521,6 +525,7 @@ async function run(): Promise<void> {
       assert(response.ok, 'Refresh failed');
       assert(responseBody.access_token !== pair.access_token, 'Access token did not rotate');
       assert(responseBody.refresh_token !== pair.refresh_token, 'Refresh token did not rotate');
+      assert(responseBody.scope === pair.scope, 'Refresh changed the granted scope');
       return responseBody;
     });
 

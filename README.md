@@ -51,7 +51,7 @@ No installation required.
 
 3. Restart Cursor/Claude Desktop
 
-**Read-only by default.** When you connect with OAuth (sign in through the browser instead of pasting a key), the client only gets tools that read your data. To let it create, update, deploy or delete, tick **Also allow changes** on the consent page. Calls to change tools from a read-only connection return an `insufficient_scope` error that explains how to reconnect. With an API key, the key's own permissions apply; create a key with read-only permissions for the same effect.
+**Read-only by default.** When you connect with OAuth (sign in through the browser instead of pasting a key), the client only gets tools that read your data. To let it create, update, deploy or delete, tick **Also allow changes** on the consent page. Calls to change tools from a read-only connection return an `insufficient_scope` error that explains how to reconnect. With an API key, the key's own permissions apply; create a key with read-only permissions for the same effect. OAuth connections made before this change keep their access until they expire.
 
 **A URL that can never write.** `https://mcp.respan.ai/mcp/readonly` (and `/mcp/enterprise/readonly`) serves only read-only tools for every credential, OAuth or API key. A sign-in started from it grants read access only, and the consent page offers no "allow changes" option (this relies on the client sending the URL as its OAuth `resource`, or the `mcp:read` scope it advertises, as MCP clients do). Even a token that can write lists only read-only tools here. Use it when a connector must stay read-only whatever the user picks.
 
