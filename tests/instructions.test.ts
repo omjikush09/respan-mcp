@@ -9,8 +9,8 @@ import { SERVER_INSTRUCTIONS } from '../lib/shared/instructions.js';
 const MAX_INSTRUCTIONS_CHARS = 2_048;
 /** Codex weighs the start of the instructions most. */
 const MAX_FIRST_PARAGRAPH_CHARS = 512;
-/** snake_case words ending like our tool names (log_summary, trace_get, ...). */
-const TOOL_NAME_PATTERN = /\b[a-z]+(?:_[a-z]+)*_(?:summary|list|get)\b/g;
+/** snake_case words ending like our tool names (log_summary, trace_get, log_filter_schema, ...). */
+const TOOL_NAME_PATTERN = /\b[a-z]+(?:_[a-z]+)*_(?:summary|list|get|schema)\b/g;
 
 async function connect() {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

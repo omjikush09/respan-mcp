@@ -90,7 +90,7 @@ export function filterConditionSchema(fieldDescription: string) {
     field: z.string().describe(fieldDescription),
     operator: z
       .enum(FILTER_OPERATORS)
-      .describe("'' = equals, 'not' = not equal, 'in' = any of the values, 'lt'/'lte'/'gt'/'gte' = comparisons, 'icontains' = case-insensitive substring, 'empty'/'not_empty' = has no value / has a value. log_filter_schema lists which operators each field takes."),
+      .describe("'' = equals, 'not' = not equal, 'in' = any of the values, 'lt'/'lte'/'gt'/'gte' = comparisons, 'contains'/'icontains' = substring (icontains ignores case), 'startswith'/'not_startswith'/'endswith' = prefix or suffix, 'isnull' = null check (value [true] or [false]), 'empty'/'not_empty' = has no value / has a value (send value [true])."),
     value: z
       .array(z.union([z.string(), z.number(), z.boolean()]))
       .describe("Value(s) as an array, e.g. [5], ['gpt-4o'], [true]."),

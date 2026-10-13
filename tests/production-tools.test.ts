@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerProductionTools } from '../lib/production/index.js';
+import { fitFilterSchema } from '../lib/production/filter-schema.js';
 import { resolveTimeWindow } from '../lib/production/params.js';
 import { TRACE_FILTER_FIELDS } from '../lib/production/traces.js';
 import { VALIDATION_ERROR_CODE } from '../lib/shared/filter-fields.js';
@@ -401,6 +402,61 @@ describe('log_filter_schema', () => {
     await log_filter_schema.handler({});
 
     expect(call().query).toEqual({});
+  });
+
+  it('says the backend lacks the endpoint when it answers 404', async () => {
+    const { client, fetchMock } = fakeClient();
+    fetchMock.mockImplementationOnce(async () => new Response(JSON.stringify({ detail: 'Not found.' }), { status: 404 }));
+    const { log_filter_schema } = captureTools(client);
+
+    const result = await log_filter_schema.handler({});
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('not available on this Respan backend');
+  });
+
+  it('drops whole metadata example values first, keeping closed vocabularies whole', async () => {
+    const value = 'tenant-value-0000000';
+    const status = { metric: 'status', operators: [''], example_values: ['success', 'failed'], value_count: 2, value_labels: { failed: 'Error' } };
+    const metadata = Array.from({ length: 100 }, (_, i) => ({
+      metric: `metadata__key_${i}`,
+      operators: ['', 'in'],
+      example_values: Array.from({ length: 30 }, (__, j) => `${value}${j}`),
+    }));
+    const { client } = fakeClient({ filters: [status, ...metadata], operators: {}, measurements: { is_measured: true } });
+    const { log_filter_schema } = captureTools(client);
+
+    const result = await log_filter_schema.handler({});
+    const body = parsed(result);
+
+    expect(result.content[0].text.length).toBeLessThanOrEqual(40_000);
+    expect(body.filters).toHaveLength(101);
+    expect(body.filters[0]).toEqual(status);
+    expect(body.filters[1].example_values).toEqual(Array.from({ length: 10 }, (_, j) => `${value}${j}`));
+  });
+
+  it('drops the labels of values it drops, then metadata keys as a last resort', () => {
+    const ids = Array.from({ length: 30 }, (_, j) => `prompt-${j}`);
+    const prompt = {
+      metric: 'prompt_id',
+      example_values: ids,
+      value_count: 30,
+      value_labels: Object.fromEntries(ids.map((id) => [id, 'x'.repeat(2_000)])),
+    };
+    const metadata = Array.from({ length: 100 }, (_, i) => ({ metric: `metadata__${'k'.repeat(400)}${i}` }));
+
+    const body = JSON.parse(fitFilterSchema({ filters: [prompt, ...metadata], metadata_filters_omitted: 5 }));
+
+    expect(body.filters).toEqual([{ ...prompt, example_values: ids.slice(0, 3), value_labels: Object.fromEntries(ids.slice(0, 3).map((id) => [id, 'x'.repeat(2_000)])) }]);
+    expect(body.metadata_filters_omitted).toBe(105);
+  });
+
+  it('still throws other backend errors', async () => {
+    const { client, fetchMock } = fakeClient();
+    fetchMock.mockImplementationOnce(async () => new Response('denied', { status: 403 }));
+    const { log_filter_schema } = captureTools(client);
+
+    await expect(log_filter_schema.handler({})).rejects.toThrow(/^403 /);
   });
 });
 
