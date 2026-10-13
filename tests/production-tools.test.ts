@@ -597,6 +597,49 @@ describe('log_groups', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('sends a repeated field as an AND-ed list and an OR as its own bundle, which the groups endpoint honours', async () => {
+    const { client, call } = fakeClient({ results: [], next: null });
+    const { log_groups } = captureTools(client);
+
+    await log_groups.handler({
+      group_by: 'model',
+      filters: [
+        { field: 'status_code', operator: '', value: [200] },
+        { field: 'latency', operator: 'gte', value: [1] },
+        { field: 'latency', operator: 'lte', value: [5] },
+        { field: 'model', operator: '', value: ['gpt-4o'] },
+        { field: 'model', operator: '', value: ['gpt-4o-mini'], connector: 'OR' },
+      ],
+    });
+
+    expect(call().body).toEqual({ filters: {
+      status_code: { operator: '', value: [200] },
+      latency: [{ operator: 'gte', value: [1] }, { operator: 'lte', value: [5] }],
+      or_group__model: { connector: 'AND', filter_params: { model: [
+        { operator: '', value: ['gpt-4o'] },
+        { operator: '', value: ['gpt-4o-mini'], connector: 'OR' },
+      ] } },
+    } });
+  });
+
+  it('rejects a virtual filter even when it only appears as an OR alternative', async () => {
+    const { client, fetchMock } = fakeClient();
+    const { log_groups } = captureTools(client);
+
+    const result = await log_groups.handler({
+      group_by: 'model',
+      filters: [
+        { field: 'model', operator: '', value: ['gpt-4o'] },
+        { field: 'topics', operator: '', value: ['billing'], connector: 'OR' },
+        { field: 'topics', operator: '', value: ['refunds'], connector: 'OR' },
+      ],
+    });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text).error.unsupported_fields).toEqual(['topics']);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('drops a name that only repeats the group key', async () => {
     const { client } = fakeClient({ results: [{ provider_id: 'openai', name: 'openai', number_of_requests: 3 }], next: null });
     const { log_groups } = captureTools(client);

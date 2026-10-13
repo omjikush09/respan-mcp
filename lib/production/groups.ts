@@ -91,7 +91,7 @@ Takes log_list's filters except behaviors, topics and fault_domain (log_filter_s
         filters: z
           .array(filterConditionSchema("Log field, e.g. status_code, latency, customer_identifier, or 'metadata__<key>'. log_filter_schema lists them."))
           .optional()
-          .describe("Only count requests matching all of these, as in log_list. Example: [{\"field\": \"status_code\", \"operator\": \"\", \"value\": [429]}]."),
+          .describe("Only count requests matching these, as in log_list. Example: [{\"field\": \"status_code\", \"operator\": \"\", \"value\": [429]}]. Repeat a field for a range; connector 'OR' on a repeat ORs it with that field's previous condition."),
         sort_by: z.enum(RANK_METRICS).optional().describe("Largest first by this metric. Default: number_of_requests."),
         ...pageShape(LOG_GROUP_PAGE_SIZE_DEFAULT, LOG_GROUP_PAGE_SIZE_MAX),
       },
