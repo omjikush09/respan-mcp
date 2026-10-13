@@ -128,6 +128,7 @@ What is happening in your app. Every tool here is read-only and defaults to the 
 |------|-------------|
 | `log_list` | Find individual requests and spans (compact rows, no message text) |
 | `log_get` | Read one request in full: messages, output, cost, tokens, scores |
+| `log_groups` | Break requests down by model, provider, customer, prompt, deployment or custom ID, with counts, errors, cost, tokens and latency per group |
 | `trace_list` | Find agent or workflow runs, with per-run totals |
 | `trace_get` | Read one run as a tree of spans |
 | `thread_list` | Find conversations (requests sharing a `thread_identifier`) |
@@ -227,6 +228,7 @@ respan-mcp/
 │   │   └── tool-result.ts    # size budgets, internal-field stripping
 │   ├── production/
 │   │   ├── logs.ts           # log_list, log_get
+│   │   ├── groups.ts         # log_groups
 │   │   ├── traces.ts         # trace_list, trace_get
 │   │   ├── threads.ts        # thread_list, thread_get
 │   │   └── metrics.ts        # dashboard_llm_metrics_summary, dashboard_top_models, end_user_rank_by_usage

@@ -413,7 +413,7 @@ describe('log_groups', () => {
       results: [
         { customer_identifier: 'initech_user_3', name: 'Initech', email: 'ops@initech.example', number_of_requests: 10,
           error_count: 2, error_percentage: 20, total_cost: 0.5, total_prompt_tokens: 28000, total_completion_tokens: 900,
-          average_latency: 4.2, latency_p_95: null, date_group: '1970-01-01 00:00:00', max_tpm: null },
+          total_tokens: 29400, average_latency: 4.2, latency_p_95: null, date_group: '1970-01-01 00:00:00', max_tpm: null },
       ],
       next: null,
       count: 1,
@@ -435,8 +435,60 @@ describe('log_groups', () => {
     expect(result).toMatchObject({ group_by: 'customer_identifier', returned: 1, has_more: false });
     expect(result.groups).toEqual([{
       customer_identifier: 'initech_user_3', name: 'Initech', number_of_requests: 10, error_count: 2, error_percentage: 20,
-      total_cost: 0.5, total_prompt_tokens: 28000, total_completion_tokens: 900, average_latency: 4.2,
+      total_cost: 0.5, total_prompt_tokens: 28000, total_completion_tokens: 900, total_tokens: 29400, average_latency: 4.2,
     }]);
+  });
+
+  it('asks for and echoes only the latest 90 days of a longer window, as the endpoint clamps it', async () => {
+    const { client, call } = fakeClient({ results: [], next: null });
+    const { log_groups } = captureTools(client);
+
+    const result = parsed(await log_groups.handler({
+      group_by: 'model',
+      start_time: '2026-01-01T00:00:00Z',
+      end_time: '2026-10-11T00:00:00Z',
+    }));
+
+    expect(call().query).toMatchObject({ start_time: '2026-07-13T00:00:00.000Z', end_time: '2026-10-11T00:00:00.000Z' });
+    expect(call().query.requested_start_time).toBeUndefined();
+    expect(result).toMatchObject({ start_time: '2026-07-13T00:00:00.000Z', requested_start_time: '2026-01-01T00:00:00.000Z' });
+  });
+
+  it('leaves a window of exactly 90 days alone', async () => {
+    const { client, call } = fakeClient({ results: [], next: null });
+    const { log_groups } = captureTools(client);
+
+    const result = parsed(await log_groups.handler({
+      group_by: 'model',
+      start_time: '2026-07-13T00:00:00Z',
+      end_time: '2026-10-11T00:00:00Z',
+    }));
+
+    expect(call().query.start_time).toBe('2026-07-13T00:00:00.000Z');
+    expect(result.requested_start_time).toBeUndefined();
+  });
+
+  it('rejects the virtual log_list filters the groups endpoint cannot compile', async () => {
+    const { client, fetchMock } = fakeClient();
+    const { log_groups } = captureTools(client);
+
+    const result = await log_groups.handler({
+      group_by: 'model',
+      filters: [{ field: 'fault_domain', operator: '', value: ['provider'] }],
+    });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text).error).toMatchObject({ code: VALIDATION_ERROR_CODE, unsupported_fields: ['fault_domain'] });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('drops a name that only repeats the group key', async () => {
+    const { client } = fakeClient({ results: [{ provider_id: 'openai', name: 'openai', number_of_requests: 3 }], next: null });
+    const { log_groups } = captureTools(client);
+
+    const result = parsed(await log_groups.handler({ group_by: 'provider_id' }));
+
+    expect(result.groups).toEqual([{ provider_id: 'openai', number_of_requests: 3 }]);
   });
 
   it('reports more pages when the backend links a next page', async () => {
