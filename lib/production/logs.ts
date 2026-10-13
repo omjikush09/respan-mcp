@@ -83,7 +83,7 @@ export function registerLogTools(server: McpServer, client: AuthenticatedClient 
 
 Returns one page of compact rows: ${LOG_LIST_FIELDS.join(", ")}. Message text is not included: call log_get with a row's unique_id to read the full input and output.
 
-Defaults to the last 24 hours. The result has no total count: for totals over a period (request count, cost, error rate) use dashboard_llm_metrics_summary instead of paging through rows.`,
+Defaults to the last 24 hours. The result has no total count: for totals over a period use log_summary (request count, cost, tokens, latency; counts only API-key requests by default; its filters are an object keyed by field) or dashboard_llm_metrics_summary (adds error rate) instead of paging through rows.`,
       inputSchema: {
         ...timeWindowShape,
         ...environmentShape,

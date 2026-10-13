@@ -122,7 +122,7 @@ already bound to one organization and cannot switch.
 
 ### Production
 
-What is happening in your app. Every tool here is read-only and defaults to the last 24 hours.
+What is happening in your app. Every tool here is read-only. The list and dashboard tools default to the last 24 hours. `log_summary` requires `start_time` and `end_time`; `trace_summary` and `thread_summary` default to the last hour, so pass a window to compare them with the other tools.
 
 | Tool | Description |
 |------|-------------|
@@ -133,6 +133,9 @@ What is happening in your app. Every tool here is read-only and defaults to the 
 | `trace_get` | Read one run as a tree of spans |
 | `thread_list` | Find conversations (requests sharing a `thread_identifier`) |
 | `thread_get` | Read one conversation's totals |
+| `log_summary` | Totals over requests in a window: count, cost, tokens, latency, scores |
+| `trace_summary` | Totals over traces: count, cost, tokens, duration, errors |
+| `thread_summary` | Totals over conversations |
 | `dashboard_llm_metrics_summary` | Requests, cost, tokens, latency and error rate for a time range |
 | `dashboard_top_models` | Rank models by requests, cost, tokens, errors or latency |
 | `end_user_rank_by_usage` | Rank your app's end users the same way |
@@ -231,7 +234,8 @@ respan-mcp/
 │   │   ├── filter-schema.ts  # log_filter_schema
 │   │   ├── traces.ts         # trace_list, trace_get
 │   │   ├── threads.ts        # thread_list, thread_get
-│   │   └── metrics.ts        # dashboard_llm_metrics_summary, dashboard_top_models, end_user_rank_by_usage
+│   │   ├── metrics.ts        # dashboard_llm_metrics_summary, dashboard_top_models, end_user_rank_by_usage
+│   │   └── summaries.ts      # log_summary, trace_summary, thread_summary
 │   ├── pulses/
 │   │   └── index.ts          # behaviors, error issues, incidents
 │   ├── account/

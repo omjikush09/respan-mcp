@@ -477,7 +477,7 @@ describe('log_summary', () => {
       },
     }));
     const { path, query, body } = call();
-    expect(path).toBe('/clickhouse/request-logs/summary/');
+    expect(path).toBe('/api/request-logs/summary/');
     expect(query).toEqual({ start_time: '2026-09-01T00:00:00Z', environment: 'prod' });
     expect(body).toEqual({
       filters: {
@@ -496,6 +496,45 @@ describe('log_summary', () => {
     const { log_summary } = captureTools(client);
     await log_summary.handler({ filters: { organization_key_id: { operator: '', value: '' } } });
     expect(call().body).toEqual({ filters: {} });
+    // Python truthiness: an empty list is the same opt-out.
+    await log_summary.handler({ filters: { organization_key_id: { operator: '', value: [] } } });
+    expect(call(1).body).toEqual({ filters: {} });
+  });
+
+  it('skips empty shortcut values the way the executor\'s truthiness checks do', async () => {
+    const { client, call } = fakeClient({ number_of_requests: 3 });
+    const { log_summary } = captureTools(client);
+    await log_summary.handler({ model: '', customer_identifier: '', used_custom_credential: false });
+    expect(call().body).toEqual({
+      filters: {
+        used_custom_credential: { operator: '', value: false },
+        organization_key_id: { operator: 'not_empty', value: true },
+      },
+    });
+  });
+
+  it('keeps scores by default and a caller key filter that has an operator', async () => {
+    const { client, call } = fakeClient({ number_of_requests: 3, scores: { e1: {} } });
+    const { log_summary } = captureTools(client);
+    const result = parsed(await log_summary.handler({ filters: { organization_key_id: { operator: 'empty', value: '' } } }));
+    expect(result).toEqual({ number_of_requests: 3, scores: { e1: {} } });
+    expect(call().body).toEqual({ filters: { organization_key_id: { operator: 'empty', value: '' } } });
+  });
+
+  it('strips a bundle-shaped org-scope filter', async () => {
+    const { client, call } = fakeClient({ number_of_requests: 3 });
+    const { log_summary } = captureTools(client);
+    await log_summary.handler({ filters: { unique_organization_id: { operator: 'in', value: ['o'], filter_params: {} } } });
+    expect(call().body).toEqual({ filters: { organization_key_id: { operator: 'not_empty', value: true } } });
+  });
+
+  it('passes Object.prototype names through as plain fields and keeps array key filters', async () => {
+    const { client, call } = fakeClient({ number_of_requests: 3 });
+    const { log_summary } = captureTools(client);
+    await log_summary.handler({
+      filters: { constructor: { operator: '', value: ['x'] }, organization_key_id: [] },
+    });
+    expect(call().body).toEqual({ filters: { constructor: { operator: '', value: ['x'] }, organization_key_id: [] } });
   });
 });
 
@@ -509,12 +548,21 @@ describe('trace_summary and thread_summary', () => {
       const tool = captureTools(client)[name];
       await tool.handler({
         end_time: '2026-09-02T00:00:00Z',
-        filters: { unique_organization_id: { value: ['x'] }, error_count: { operator: 'gt', value: [0] } },
+        filters: {
+          unique_organization_id: { value: ['x'] },
+          error_count: { operator: 'gt', value: [0] },
+          either: { connector: 'OR', filter_params: { unique_organization_id: { value: ['y'] }, model: { value: ['m'] } } },
+        },
       });
       const sent = call();
       expect(sent.path, name).toBe(path);
       expect(sent.query, name).toEqual({ end_time: '2026-09-02T00:00:00Z' });
-      expect(sent.body, name).toEqual({ filters: { error_count: { operator: 'gt', value: [0] } } });
+      expect(sent.body, name).toEqual({
+        filters: {
+          error_count: { operator: 'gt', value: [0] },
+          either: { connector: 'OR', filter_params: { model: { value: ['m'] } } },
+        },
+      });
     }
   });
 });
