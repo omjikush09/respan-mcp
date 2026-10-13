@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
+  OR_GROUP_KEY_PREFIX,
   VALIDATION_ERROR_CODE,
+  addFilterCondition,
   filterGuardError,
   guardErrorResult,
   isSupportedFilterField,
+  orConnectorFields,
   toBackendFilters,
   unsupportedFilterFields,
+  type BackendFilterBody,
   type FilterFieldSpec,
 } from '../lib/shared/filter-fields.js';
 
@@ -103,6 +107,83 @@ describe('toBackendFilters', () => {
     ).toEqual({
       cost: { operator: 'gt', value: [0.01] },
       model: { operator: '', value: ['gpt-4o'] },
+    });
+  });
+
+  it('sends two conditions on one field as a list in input order, so a range keeps both bounds', () => {
+    expect(
+      toBackendFilters([
+        { field: 'cost', operator: 'gte', value: [0.05] },
+        { field: 'model', value: ['gpt-4o'] },
+        { field: 'cost', operator: 'lt', value: [1] },
+      ]),
+    ).toEqual({
+      cost: [
+        { operator: 'gte', value: [0.05] },
+        { operator: 'lt', value: [1] },
+      ],
+      model: { operator: '', value: ['gpt-4o'] },
+    });
+  });
+
+  it('groups a field with an OR connector so it cannot OR across other fields', () => {
+    expect(
+      toBackendFilters([
+        { field: 'latency', operator: 'gt', value: [5] },
+        { field: 'model', operator: 'icontains', value: ['claude'], connector: 'OR' },
+        { field: 'model', operator: 'icontains', value: ['gpt'], connector: 'OR' },
+      ]),
+    ).toEqual({
+      latency: { operator: 'gt', value: [5] },
+      [`${OR_GROUP_KEY_PREFIX}model`]: {
+        connector: 'AND',
+        filter_params: {
+          model: [
+            { operator: 'icontains', value: ['claude'] },
+            { operator: 'icontains', value: ['gpt'], connector: 'OR' },
+          ],
+        },
+      },
+    });
+  });
+
+  it('treats an explicit AND connector as the default list', () => {
+    expect(
+      toBackendFilters([
+        { field: 'cost', operator: 'gt', value: [0], connector: 'AND' },
+        { field: 'cost', operator: 'lt', value: [1], connector: 'AND' },
+      ]),
+    ).toEqual({ cost: [{ operator: 'gt', value: [0] }, { operator: 'lt', value: [1] }] });
+  });
+});
+
+describe('orConnectorFields', () => {
+  it('names fields with an OR after their first condition, ignoring a leading OR', () => {
+    expect(
+      orConnectorFields([
+        { field: 'cost', value: [1], connector: 'OR' },
+        { field: 'model', value: ['a'] },
+        { field: 'model', value: ['b'], connector: 'OR' },
+        { field: 'cost', value: [2], connector: 'AND' },
+      ]),
+    ).toEqual(['model']);
+    expect(orConnectorFields(undefined)).toEqual([]);
+  });
+});
+
+describe('addFilterCondition', () => {
+  it('adds a convenience condition next to a same-field filter instead of replacing it', () => {
+    const body: BackendFilterBody = { ...toBackendFilters([{ field: 'model', operator: 'not', value: ['gpt-4o-mini'] }]) };
+    addFilterCondition(body, 'model', { operator: 'icontains', value: ['gpt-4o'] });
+    addFilterCondition(body, 'model', { operator: 'endswith', value: ['-2024'] });
+    addFilterCondition(body, 'status', { operator: '', value: ['failed'] });
+    expect(body).toEqual({
+      model: [
+        { operator: 'not', value: ['gpt-4o-mini'] },
+        { operator: 'icontains', value: ['gpt-4o'] },
+        { operator: 'endswith', value: ['-2024'] },
+      ],
+      status: { operator: '', value: ['failed'] },
     });
   });
 });

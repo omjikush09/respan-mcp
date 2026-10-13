@@ -4,6 +4,7 @@
 // paging, and the advanced filter condition.
 
 import { z } from "zod";
+import { FILTER_CONNECTORS } from "../shared/filter-fields.js";
 
 /** EnvironmentChoices in the backend (utils/constants/environment_constants.py). */
 export const ENVIRONMENTS = ["prod", "stage", "test"] as const;
@@ -94,6 +95,10 @@ export function filterConditionSchema(fieldDescription: string) {
     value: z
       .array(z.union([z.string(), z.number(), z.boolean()]))
       .describe("Value(s) as an array, e.g. [5], ['gpt-4o'], [true]."),
+    connector: z
+      .enum(FILTER_CONNECTORS)
+      .optional()
+      .describe("Joins this condition to the previous one on the same field: 'AND' (default) or 'OR'."),
   });
 }
 

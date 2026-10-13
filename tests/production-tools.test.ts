@@ -155,6 +155,32 @@ describe('log_list', () => {
     });
   });
 
+  it('sends every condition on one field, and keeps a filter the model shortcut also sets', async () => {
+    const { client, call } = fakeClient();
+    const { log_list } = captureTools(client);
+    await log_list.handler({
+      model: 'gpt-4o',
+      filters: [
+        { field: 'cost', operator: 'gte', value: [0.05] },
+        { field: 'cost', operator: 'lt', value: [1] },
+        { field: 'model', operator: 'not', value: ['gpt-4o-mini'] },
+      ],
+    });
+    expect(call().body).toEqual({
+      operator: 'AND',
+      filters: {
+        cost: [
+          { operator: 'gte', value: [0.05] },
+          { operator: 'lt', value: [1] },
+        ],
+        model: [
+          { operator: 'not', value: ['gpt-4o-mini'] },
+          { operator: 'icontains', value: ['gpt-4o'] },
+        ],
+      },
+    });
+  });
+
   it('sends an empty body without filters', async () => {
     const { client, call } = fakeClient();
     const { log_list } = captureTools(client);
@@ -256,6 +282,39 @@ describe('trace_list', () => {
         error_count: { operator: 'gt', value: [0] },
       },
     });
+  });
+
+  it('keeps a filter on a field a shortcut also sets', async () => {
+    const { client, call } = fakeClient();
+    const { trace_list } = captureTools(client);
+    await trace_list.handler({
+      errors_only: true,
+      filters: [{ field: 'error_count', operator: 'lt', value: [5] }],
+    });
+    expect(call().body).toEqual({
+      filters: {
+        error_count: [
+          { operator: 'lt', value: [5] },
+          { operator: 'gt', value: [0] },
+        ],
+      },
+    });
+  });
+
+  it('rejects an OR connector before calling the backend, which refuses filter groups on traces', async () => {
+    const { client, fetchMock } = fakeClient();
+    const { trace_list } = captureTools(client);
+    const result = await trace_list.handler({
+      filters: [
+        { field: 'model', operator: 'icontains', value: ['claude'] },
+        { field: 'model', operator: 'icontains', value: ['gpt'], connector: 'OR' },
+      ],
+    });
+    expect(result.isError).toBe(true);
+    const error = parsed(result).error;
+    expect(error.code).toBe(VALIDATION_ERROR_CODE);
+    expect(error.unsupported_fields).toEqual(['model']);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('shortens input and output previews', async () => {
