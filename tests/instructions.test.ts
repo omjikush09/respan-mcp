@@ -9,8 +9,10 @@ import { SERVER_INSTRUCTIONS } from '../lib/shared/instructions.js';
 const MAX_INSTRUCTIONS_CHARS = 2_048;
 /** Codex weighs the start of the instructions most. */
 const MAX_FIRST_PARAGRAPH_CHARS = 512;
-/** snake_case words ending like our tool names (log_summary, trace_get, ...). */
-const TOOL_NAME_PATTERN = /\b[a-z]+(?:_[a-z]+)*_(?:summary|list|get)\b/g;
+/** Every snake_case word; each one must be a registered tool or a known field. */
+const SNAKE_CASE_PATTERN = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;
+/** Response and argument fields the instructions name, which are not tools. */
+const NON_TOOL_WORDS = new Set(['start_time', 'end_time', 'has_more']);
 
 async function connect() {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -28,21 +30,29 @@ describe('server instructions', () => {
 
   it('are sent in initialize', async () => {
     const client = await connect();
-    expect(client.getInstructions()).toBe(SERVER_INSTRUCTIONS);
-    await client.close();
+    try {
+      expect(client.getInstructions()).toBe(SERVER_INSTRUCTIONS);
+    } finally {
+      await client.close();
+    }
   });
 
   it('name only tools the server registers', async () => {
     const client = await connect();
-    const registered = new Set((await client.listTools()).tools.map((tool) => tool.name));
-    await client.close();
-    const named = [...new Set(SERVER_INSTRUCTIONS.match(TOOL_NAME_PATTERN) ?? [])];
+    let registered: Set<string>;
+    try {
+      registered = new Set((await client.listTools()).tools.map((tool) => tool.name));
+    } finally {
+      await client.close();
+    }
+    const named = [...new Set(SERVER_INSTRUCTIONS.match(SNAKE_CASE_PATTERN) ?? [])]
+      .filter((word) => !NON_TOOL_WORDS.has(word));
     expect(named.length).toBeGreaterThan(5);
     expect(named.filter((name) => !registered.has(name))).toEqual([]);
   });
 
   it('are also set on the stdio server', () => {
     const stdio = readFileSync(new URL('../lib/index.ts', import.meta.url), 'utf8');
-    expect(stdio).toContain('instructions: SERVER_INSTRUCTIONS');
+    expect(stdio).toMatch(/\{\s*instructions:\s*SERVER_INSTRUCTIONS\s*\}/);
   });
 });
