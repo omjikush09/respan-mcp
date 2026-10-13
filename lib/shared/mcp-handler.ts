@@ -21,7 +21,7 @@ import { resolveToolName, rewriteToolCallNames } from './tool-aliases.js';
 import { OAuthBroker, type ResolvedAccess } from '../oauth/broker.js';
 import { getOAuthConfig, type OAuthRealm } from '../oauth/config.js';
 import { InvalidAccessTokenError } from '../oauth/errors.js';
-import { isReadOnlySession, MCP_READ_SCOPE, MCP_WRITE_SCOPE } from '../oauth/scopes.js';
+import { isReadOnlySession, MCP_WRITE_SCOPE, SUPPORTED_SCOPES } from '../oauth/scopes.js';
 import { getSessionStore } from '../oauth/store-factory.js';
 import { SessionStoreUnavailableError } from '../oauth/store.js';
 import {
@@ -93,16 +93,36 @@ function sendUnauthorized(
   });
 }
 
-/** The single tools/call in `body` that targets a hidden write tool, if any. */
-function hiddenWriteToolCall(
+/** `message` as a tools/call request (it has an id) for a hidden write tool, if it is one. */
+function hiddenWriteToolRequest(
+  hidden: ReadonlySet<string>,
+  message: unknown,
+): { id: unknown; name: string } | undefined {
+  if (!message || typeof message !== 'object' || Array.isArray(message)) return undefined;
+  const { id, method, params } = message as { id?: unknown; method?: unknown; params?: { name?: unknown } };
+  if (id === undefined || method !== 'tools/call' || typeof params?.name !== 'string' || !hidden.has(params.name)) return undefined;
+  return { id, name: params.name };
+}
+
+/**
+ * The tools/call requests in `body` that target hidden write tools, when every
+ * message in it is one (a single request, or a batch made only of them). A
+ * mixed batch or an id-less message falls through to the transport, which
+ * still refuses the hidden tool (it was never registered), just without the
+ * insufficient_scope explanation.
+ */
+function hiddenWriteToolCalls(
   server: McpServer,
   body: unknown,
-): { id: unknown; name: string } | undefined {
+): { id: unknown; name: string }[] | undefined {
   const hidden = hiddenWriteToolsOf(server);
-  if (hidden.size === 0 || !body || typeof body !== 'object' || Array.isArray(body)) return undefined;
-  const { id, method, params } = body as { id?: unknown; method?: unknown; params?: { name?: unknown } };
-  if (method !== 'tools/call' || typeof params?.name !== 'string' || !hidden.has(params.name)) return undefined;
-  return { id, name: params.name };
+  if (hidden.size === 0) return undefined;
+  const messages = Array.isArray(body) ? body : [body];
+  if (messages.length === 0) return undefined;
+  const blocked = messages.map((message) => hiddenWriteToolRequest(hidden, message));
+  return blocked.every((call) => call !== undefined)
+    ? (blocked as { id: unknown; name: string }[])
+    : undefined;
 }
 
 /**
@@ -110,7 +130,7 @@ function hiddenWriteToolCall(
  * `_meta["mcp/www_authenticate"]` lets ChatGPT offer the user a new consent.
  */
 function insufficientScopeResult(toolName: string, resourceMetadataPath: string) {
-  const scope = `${MCP_READ_SCOPE} ${MCP_WRITE_SCOPE}`;
+  const scope = SUPPORTED_SCOPES.join(' ');
   return {
     content: [{
       type: 'text',
@@ -119,7 +139,8 @@ function insufficientScopeResult(toolName: string, resourceMetadataPath: string)
           code: 'insufficient_scope',
           message: `${toolName} changes data, and this connection is read-only.`,
           hint: 'Ask the user to reconnect Respan and tick "Also allow changes" on the '
-            + 'consent page. Read-only tools keep working without it.',
+            + 'consent page. The page offers that option only when this client requests '
+            + 'write access. Read-only tools keep working without it.',
           required_scope: MCP_WRITE_SCOPE,
         },
       }),
@@ -269,22 +290,23 @@ export function createMcpHandler(
       // API keys carry their own permissions, enforced by the backend.
       const isReadOnly = oauthAccess ? isReadOnlySession(oauthAccess.session.scope) : false;
       const server = createServer(authenticatedClient, enabledTools, isReadOnly);
+      const renamedTools = rewriteToolCallNames(req.body);
+      if (renamedTools.length > 0) {
+        console.warn(`MCP tools/call used old tool name(s): ${renamedTools.join(', ')}`);
+      }
+      const blockedCalls = hiddenWriteToolCalls(server, req.body);
+      if (blockedCalls) {
+        const responses = blockedCalls.map(({ id, name }) => ({
+          jsonrpc: '2.0',
+          id,
+          result: insufficientScopeResult(name, resourceMetadataPath),
+        }));
+        return res.status(200).json(Array.isArray(req.body) ? responses : responses[0]);
+      }
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
       });
       await server.connect(transport);
-      const renamedTools = rewriteToolCallNames(req.body);
-      const blockedCall = hiddenWriteToolCall(server, req.body);
-      if (blockedCall) {
-        return res.status(200).json({
-          jsonrpc: '2.0',
-          id: blockedCall.id,
-          result: insufficientScopeResult(blockedCall.name, resourceMetadataPath),
-        });
-      }
-      if (renamedTools.length > 0) {
-        console.warn(`MCP tools/call used old tool name(s): ${renamedTools.join(', ')}`);
-      }
       const transportResponse = await transport.handleRequest(
         toWebRequest(req),
         { parsedBody: req.body },

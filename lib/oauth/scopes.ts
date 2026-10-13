@@ -14,10 +14,9 @@ export const SUPPORTED_SCOPES = [MCP_READ_SCOPE, MCP_WRITE_SCOPE] as const;
 
 /** Sessions issued before scopes existed carry none; this env var decides them. */
 export const LEGACY_SCOPE_ENV = 'MCP_LEGACY_SCOPE';
-const LEGACY_SCOPE_READ_ONLY = 'read';
-
 function formatScope(scopes: Iterable<string>): string {
-  return SUPPORTED_SCOPES.filter((scope) => new Set(scopes).has(scope)).join(' ');
+  const have = new Set(scopes);
+  return SUPPORTED_SCOPES.filter((scope) => have.has(scope)).join(' ');
 }
 
 function scopeSet(scope: string | undefined): Set<string> {
@@ -27,11 +26,13 @@ function scopeSet(scope: string | undefined): Set<string> {
 /**
  * The scopes a client asked for at /authorize. Clients that send no `scope`
  * are treated as asking for everything, so the user still decides at consent.
- * Unknown values are dropped, and read is always included.
+ * Unknown values are dropped, and read is always included. A scope made only of
+ * values this server does not define (claude.ai sends `claudeai`) says nothing
+ * about read vs write, so it is treated like a missing one.
  */
 export function requestedScope(raw: string | undefined): string {
-  if (raw === undefined || raw.trim() === '') return formatScope(SUPPORTED_SCOPES);
   const asked = scopeSet(raw);
+  if (!SUPPORTED_SCOPES.some((scope) => asked.has(scope))) return formatScope(SUPPORTED_SCOPES);
   asked.add(MCP_READ_SCOPE);
   return formatScope(asked);
 }
@@ -52,12 +53,14 @@ export function hasWriteScope(scope: string | undefined): boolean {
 /**
  * Whether a session may only use read-only tools. A scoped session is read-only
  * unless it holds mcp:write. A legacy session (no scope recorded) keeps the
- * full access it was granted, unless MCP_LEGACY_SCOPE=read turns it read-only.
+ * full access it was granted, unless MCP_LEGACY_SCOPE is set. The only reason to
+ * set it is to cut legacy sessions back, so any non-empty value (documented as
+ * `read`) makes them read-only; a misspelling fails closed, not open.
  */
 export function isReadOnlySession(
   scope: string | undefined,
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
-  if (scope === undefined) return env[LEGACY_SCOPE_ENV] === LEGACY_SCOPE_READ_ONLY;
+  if (scope === undefined) return (env[LEGACY_SCOPE_ENV] ?? '').trim() !== '';
   return !hasWriteScope(scope);
 }
