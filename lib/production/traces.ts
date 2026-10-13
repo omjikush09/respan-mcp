@@ -189,7 +189,7 @@ export function registerTraceTools(server: McpServer, client: AuthenticatedClien
 
 Returns one page of rollups per trace: ${TRACE_LIST_FIELDS.join(", ")}. input and output are short previews; call trace_get with a trace_unique_id to see every span.
 
-Defaults to the last 24 hours, newest first.`,
+Defaults to the last 24 hours, newest first. For totals (trace count, cost, errors) use trace_summary, passing the same window: it defaults to the last hour.`,
       inputSchema: {
         ...timeWindowShape,
         ...environmentShape,

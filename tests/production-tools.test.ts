@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerProductionTools } from '../lib/production/index.js';
+import { fitFilterSchema } from '../lib/production/filter-schema.js';
 import { resolveTimeWindow } from '../lib/production/params.js';
 import { TRACE_FILTER_FIELDS } from '../lib/production/traces.js';
 import { VALIDATION_ERROR_CODE } from '../lib/shared/filter-fields.js';
@@ -403,6 +404,61 @@ describe('log_filter_schema', () => {
 
     expect(call().query).toEqual({});
   });
+
+  it('says the backend lacks the endpoint when it answers 404', async () => {
+    const { client, fetchMock } = fakeClient();
+    fetchMock.mockImplementationOnce(async () => new Response(JSON.stringify({ detail: 'Not found.' }), { status: 404 }));
+    const { log_filter_schema } = captureTools(client);
+
+    const result = await log_filter_schema.handler({});
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('not available on this Respan backend');
+  });
+
+  it('drops whole metadata example values first, keeping closed vocabularies whole', async () => {
+    const value = 'tenant-value-0000000';
+    const status = { metric: 'status', operators: [''], example_values: ['success', 'failed'], value_count: 2, value_labels: { failed: 'Error' } };
+    const metadata = Array.from({ length: 100 }, (_, i) => ({
+      metric: `metadata__key_${i}`,
+      operators: ['', 'in'],
+      example_values: Array.from({ length: 30 }, (__, j) => `${value}${j}`),
+    }));
+    const { client } = fakeClient({ filters: [status, ...metadata], operators: {}, measurements: { is_measured: true } });
+    const { log_filter_schema } = captureTools(client);
+
+    const result = await log_filter_schema.handler({});
+    const body = parsed(result);
+
+    expect(result.content[0].text.length).toBeLessThanOrEqual(40_000);
+    expect(body.filters).toHaveLength(101);
+    expect(body.filters[0]).toEqual(status);
+    expect(body.filters[1].example_values).toEqual(Array.from({ length: 10 }, (_, j) => `${value}${j}`));
+  });
+
+  it('drops the labels of values it drops, then metadata keys as a last resort', () => {
+    const ids = Array.from({ length: 30 }, (_, j) => `prompt-${j}`);
+    const prompt = {
+      metric: 'prompt_id',
+      example_values: ids,
+      value_count: 30,
+      value_labels: Object.fromEntries(ids.map((id) => [id, 'x'.repeat(2_000)])),
+    };
+    const metadata = Array.from({ length: 100 }, (_, i) => ({ metric: `metadata__${'k'.repeat(400)}${i}` }));
+
+    const body = JSON.parse(fitFilterSchema({ filters: [prompt, ...metadata], metadata_filters_omitted: 5 }));
+
+    expect(body.filters).toEqual([{ ...prompt, example_values: ids.slice(0, 3), value_labels: Object.fromEntries(ids.slice(0, 3).map((id) => [id, 'x'.repeat(2_000)])) }]);
+    expect(body.metadata_filters_omitted).toBe(105);
+  });
+
+  it('still throws other backend errors', async () => {
+    const { client, fetchMock } = fakeClient();
+    fetchMock.mockImplementationOnce(async () => new Response('denied', { status: 403 }));
+    const { log_filter_schema } = captureTools(client);
+
+    await expect(log_filter_schema.handler({})).rejects.toThrow(/^403 /);
+  });
 });
 
 describe('log_groups', () => {
@@ -526,7 +582,7 @@ describe('log_summary', () => {
       },
     }));
     const { path, query, body } = call();
-    expect(path).toBe('/clickhouse/request-logs/summary/');
+    expect(path).toBe('/api/request-logs/summary/');
     expect(query).toEqual({ start_time: '2026-09-01T00:00:00Z', environment: 'prod' });
     expect(body).toEqual({
       filters: {
@@ -545,6 +601,45 @@ describe('log_summary', () => {
     const { log_summary } = captureTools(client);
     await log_summary.handler({ filters: { organization_key_id: { operator: '', value: '' } } });
     expect(call().body).toEqual({ filters: {} });
+    // Python truthiness: an empty list is the same opt-out.
+    await log_summary.handler({ filters: { organization_key_id: { operator: '', value: [] } } });
+    expect(call(1).body).toEqual({ filters: {} });
+  });
+
+  it('skips empty shortcut values the way the executor\'s truthiness checks do', async () => {
+    const { client, call } = fakeClient({ number_of_requests: 3 });
+    const { log_summary } = captureTools(client);
+    await log_summary.handler({ model: '', customer_identifier: '', used_custom_credential: false });
+    expect(call().body).toEqual({
+      filters: {
+        used_custom_credential: { operator: '', value: false },
+        organization_key_id: { operator: 'not_empty', value: true },
+      },
+    });
+  });
+
+  it('keeps scores by default and a caller key filter that has an operator', async () => {
+    const { client, call } = fakeClient({ number_of_requests: 3, scores: { e1: {} } });
+    const { log_summary } = captureTools(client);
+    const result = parsed(await log_summary.handler({ filters: { organization_key_id: { operator: 'empty', value: '' } } }));
+    expect(result).toEqual({ number_of_requests: 3, scores: { e1: {} } });
+    expect(call().body).toEqual({ filters: { organization_key_id: { operator: 'empty', value: '' } } });
+  });
+
+  it('strips a bundle-shaped org-scope filter', async () => {
+    const { client, call } = fakeClient({ number_of_requests: 3 });
+    const { log_summary } = captureTools(client);
+    await log_summary.handler({ filters: { unique_organization_id: { operator: 'in', value: ['o'], filter_params: {} } } });
+    expect(call().body).toEqual({ filters: { organization_key_id: { operator: 'not_empty', value: true } } });
+  });
+
+  it('passes Object.prototype names through as plain fields and keeps array key filters', async () => {
+    const { client, call } = fakeClient({ number_of_requests: 3 });
+    const { log_summary } = captureTools(client);
+    await log_summary.handler({
+      filters: { constructor: { operator: '', value: ['x'] }, organization_key_id: [] },
+    });
+    expect(call().body).toEqual({ filters: { constructor: { operator: '', value: ['x'] }, organization_key_id: [] } });
   });
 });
 
@@ -558,12 +653,21 @@ describe('trace_summary and thread_summary', () => {
       const tool = captureTools(client)[name];
       await tool.handler({
         end_time: '2026-09-02T00:00:00Z',
-        filters: { unique_organization_id: { value: ['x'] }, error_count: { operator: 'gt', value: [0] } },
+        filters: {
+          unique_organization_id: { value: ['x'] },
+          error_count: { operator: 'gt', value: [0] },
+          either: { connector: 'OR', filter_params: { unique_organization_id: { value: ['y'] }, model: { value: ['m'] } } },
+        },
       });
       const sent = call();
       expect(sent.path, name).toBe(path);
       expect(sent.query, name).toEqual({ end_time: '2026-09-02T00:00:00Z' });
-      expect(sent.body, name).toEqual({ filters: { error_count: { operator: 'gt', value: [0] } } });
+      expect(sent.body, name).toEqual({
+        filters: {
+          error_count: { operator: 'gt', value: [0] },
+          either: { connector: 'OR', filter_params: { model: { value: ['m'] } } },
+        },
+      });
     }
   });
 });

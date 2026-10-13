@@ -75,7 +75,7 @@ export function registerThreadTools(server: McpServer, client: AuthenticatedClie
 
 Returns one page of conversations with their thread_identifier, request count, cost, tokens, latency, last activity time and a short preview of the messages. To read the messages, call log_list with the thread_identifier.
 
-Defaults to the last 24 hours, newest first.`,
+Defaults to the last 24 hours, newest first. For totals (conversation count, cost) use thread_summary, passing the same window: it defaults to the last hour.`,
       inputSchema: {
         ...timeWindowShape,
         ...environmentShape,
