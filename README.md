@@ -155,6 +155,17 @@ What the platform flags on your traffic. Names, descriptions and arguments come 
 | `pulse_error_groups_list` / `pulse_error_group_get` | Error issues, grouped by fingerprint, and one issue's recent occurrences |
 | `pulse_incidents_list` | Detected windows of elevated error rate |
 
+### Guardrails
+
+The checks the gateway runs on request input and can block on. Read-only: nothing here turns a guardrail on or off.
+
+| Tool | Description |
+|------|-------------|
+| `guardrail_summary` | Requests checked, passed, blocked and skipped in a window, with blocks per guardrail |
+| `guardrail_timeseries` | Guardrail outcomes, or blocks per guardrail, over time |
+| `guardrail_grouped` | Blocked requests by guardrail, customer, model or provider |
+| `guardrail_list` | Every guardrail, whether it is on, and the PII redaction settings. Needs an OAuth (signed-in) connection; with an API key it returns an error saying so |
+
 ### Prompts
 
 | Tool | Description |
@@ -231,7 +242,8 @@ respan-mcp/
 │   │   ├── threads.ts        # thread_list, thread_get
 │   │   └── metrics.ts        # dashboard_llm_metrics_summary, dashboard_top_models, end_user_rank_by_usage
 │   ├── pulses/
-│   │   └── index.ts          # behaviors, error issues, incidents
+│   │   ├── index.ts          # behaviors, error issues, incidents
+│   │   └── guardrails.ts     # guardrail_summary, guardrail_timeseries, guardrail_grouped, guardrail_list
 │   ├── account/
 │   │   └── organizations.ts  # org_list, org_switch
 │   └── develop/

@@ -56,12 +56,15 @@ function parseTime(value: string, name: string): Date {
   return parsed;
 }
 
-/** Fills in the default 24-hour window and normalizes both ends to ISO 8601. */
-export function resolveTimeWindow(args: { start_time?: string; end_time?: string }) {
+/** Fills in the default window (24 hours unless given) and normalizes both ends to ISO 8601. */
+export function resolveTimeWindow(
+  args: { start_time?: string; end_time?: string },
+  defaultWindowMs: number = DEFAULT_WINDOW_MS,
+) {
   const end = args.end_time ? parseTime(args.end_time, "end_time") : new Date();
   const start = args.start_time
     ? parseTime(args.start_time, "start_time")
-    : new Date(end.getTime() - DEFAULT_WINDOW_MS);
+    : new Date(end.getTime() - defaultWindowMs);
   if (start >= end) throw new Error("start_time must be before end_time.");
   return { start_time: start.toISOString(), end_time: end.toISOString() };
 }
