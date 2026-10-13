@@ -17,7 +17,7 @@ import {
   omitKeys,
   readListPage,
   textResult,
-  truncateStrings,
+  type PageBudget,
 } from "../shared/tool-result.js";
 import {
   environmentShape,
@@ -168,10 +168,19 @@ const SPAN_CONTENT_KEYS: ReadonlySet<string> = new Set([
   "metadata",
 ]);
 
-/** List rows carry previews only; trace_get has the full text. */
-const TRACE_PREVIEW_CHARS = 200;
-/** Under Claude Code's 10k-token warning; strings shrink before rows are dropped. */
-const TRACE_LIST_BUDGET = { maxChars: 40_000, stringCaps: [80, 40] };
+/**
+ * List rows carry 200-char previews only (trace_get has the full text), which
+ * shrink before rows are reduced to ids. Ids and filterable names stay whole
+ * so trace_get and the filters can take them back. 40k chars of id- and
+ * digit-heavy JSON is roughly 13-16k tokens.
+ */
+const TRACE_LIST_BUDGET: PageBudget = {
+  maxChars: 40_000,
+  previewChars: 200,
+  stringCaps: [80, 40],
+  keepWhole: ["trace_unique_id", "name", "customer_identifier", "model"],
+  smallerRowsHint: "A smaller page_size fits more full rows.",
+};
 const TRACE_LIST_DETAIL_HINT = "Previews were shortened. Call trace_get with a trace_unique_id to see every span.";
 const TRACE_DETAIL_BUDGET = { maxChars: 60_000, stringCaps: [2_000, 600, 200] };
 
@@ -181,7 +190,7 @@ function projectTraceRow(row: unknown): Record<string, unknown> {
   for (const field of TRACE_LIST_FIELDS) {
     if (field in source) projected[field] = source[field];
   }
-  return truncateStrings(projected, TRACE_PREVIEW_CHARS) as Record<string, unknown>;
+  return projected;
 }
 
 export function registerTraceTools(server: McpServer, client: AuthenticatedClient | null) {
@@ -193,7 +202,7 @@ export function registerTraceTools(server: McpServer, client: AuthenticatedClien
 
 Returns one page of rollups per trace (default ${TRACE_PAGE_SIZE_DEFAULT}, up to ${TRACE_PAGE_SIZE_MAX}): ${TRACE_LIST_FIELDS.join(", ")}. input and output are short previews; call trace_get with a trace_unique_id to see every span.
 
-Each page says how many rows it returned, whether anything was shortened (\`truncated\`), and \`next_page\` when there are more. Defaults to the last 24 hours, newest first.`,
+Each page says how many rows it returned, whether anything was shortened or dropped (\`truncated\`), and \`next_page\` when there are more. When paging, send back the start_time and end_time the page reports. Defaults to the last 24 hours, newest first.`,
       inputSchema: {
         ...timeWindowShape,
         ...environmentShape,

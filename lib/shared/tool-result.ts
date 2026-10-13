@@ -58,17 +58,22 @@ export interface JsonBudget {
   stringCaps: readonly number[];
 }
 
-/** Replaces every string longer than `maxChars` with its prefix and a marker. */
-export function truncateStrings(value: unknown, maxChars: number): unknown {
+/**
+ * Replaces every string longer than `maxChars` with its prefix and a marker,
+ * unless the marker would make it longer. `cuts.count` counts the strings cut.
+ */
+export function truncateStrings(value: unknown, maxChars: number, cuts?: { count: number }): unknown {
   if (typeof value === "string") {
-    return value.length > maxChars
-      ? `${value.slice(0, maxChars)}…[truncated ${value.length - maxChars} chars]`
-      : value;
+    if (value.length <= maxChars) return value;
+    const marker = `…[truncated ${value.length - maxChars} chars]`;
+    if (marker.length >= value.length - maxChars) return value;
+    if (cuts) cuts.count += 1;
+    return `${value.slice(0, maxChars)}${marker}`;
   }
-  if (Array.isArray(value)) return value.map((item) => truncateStrings(item, maxChars));
+  if (Array.isArray(value)) return value.map((item) => truncateStrings(item, maxChars, cuts));
   if (value && typeof value === "object") {
     return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, truncateStrings(item, maxChars)]),
+      Object.entries(value).map(([key, item]) => [key, truncateStrings(item, maxChars, cuts)]),
     );
   }
   return value;
@@ -128,49 +133,114 @@ export interface ListPage {
   has_more: boolean;
 }
 
+export interface PageBudget extends JsonBudget {
+  /** Every string in a row is first cut to this preview length. */
+  previewChars: number;
+  /**
+   * Top-level row keys never shortened: ids and names the caller passes back
+   * to a detail tool or a filter. A row that does not fit is reduced to these.
+   */
+  keepWhole: readonly string[];
+  /** Extra advice when rows were reduced, e.g. how to ask for smaller rows. */
+  smallerRowsHint?: string;
+}
+
 /**
  * Serializes one page of list rows within `budget`, and never cuts silently.
- * Long strings are shortened first, through `stringCaps`; if the rows still do
- * not fit, rows are dropped from the end. The page then says what happened:
- * `returned`, `truncated` with a hint, and `next_page` when it is safe to just
- * move on (it is withheld when rows were dropped, since the next page would
- * skip them).
+ * Strings are cut to `previewChars`, then shortened further through
+ * `stringCaps`; `keepWhole` keys stay intact. If the rows still do not fit,
+ * rows are reduced to their `keepWhole` keys from the end of the page, so
+ * every row stays on the page and `next_page` stays valid. The page says what
+ * happened: `returned`, `truncated` with a hint, and `next_page`. Only when
+ * even id-only rows cannot fit are rows dropped, and then `next_page` is
+ * withheld, since it would skip them.
  */
 export function budgetedPage(
   envelope: Record<string, unknown> & ListPage,
   rows: readonly unknown[],
-  budget: JsonBudget,
+  budget: PageBudget,
   detailHint: string,
 ): string {
-  const render = (kept: readonly unknown[], cap?: number) => {
-    const omittedRows = rows.length - kept.length;
-    const truncated = cap === undefined && omittedRows === 0 ? undefined : {
-      ...(cap !== undefined ? { strings_shortened_to: cap } : {}),
+  const keepWhole = new Set(budget.keepWhole);
+  const asRecord = (row: unknown) =>
+    (row && typeof row === "object" && !Array.isArray(row) ? row : {}) as Record<string, unknown>;
+
+  // Each row shortened to `cap` (ids left whole), whether that cut anything,
+  // and the row reduced to its ids.
+  const shortenRows = (cap: number) =>
+    rows.map((row) => {
+      const cuts = { count: 0 };
+      const entries = Object.entries(asRecord(row));
+      const full = Object.fromEntries(
+        entries.map(([key, item]) => [key, keepWhole.has(key) ? item : truncateStrings(item, cap, cuts)]),
+      );
+      const ids = Object.fromEntries(entries.filter(([key]) => keepWhole.has(key)));
+      return { full, ids, isCut: cuts.count > 0 };
+    });
+  type Shortened = ReturnType<typeof shortenRows>;
+
+  // The first `fullCount` rows in full, the next `idCount` reduced to ids.
+  const render = (shortened: Shortened, cap: number, fullCount: number, idCount = rows.length - fullCount) => {
+    const results = [
+      ...shortened.slice(0, fullCount).map((row) => row.full),
+      ...shortened.slice(fullCount, fullCount + idCount).map((row) => row.ids),
+    ];
+    const omittedRows = rows.length - results.length;
+    const isShortened = shortened.slice(0, fullCount).some((row) => row.isCut);
+    const hint = [
+      isShortened || idCount > 0 ? detailHint : undefined,
+      idCount > 0 ? `The last ${idCount} rows did not fit and show only their ids.` : undefined,
+      omittedRows > 0 ? `The last ${omittedRows} rows did not fit at all; ask for this page again with a smaller page_size.` : undefined,
+      idCount > 0 || omittedRows > 0 ? budget.smallerRowsHint : undefined,
+    ].filter(Boolean).join(" ");
+    const truncated = hint ? {
+      ...(isShortened ? { strings_shortened_to: cap } : {}),
+      ...(idCount > 0 ? { rows_reduced_to_ids: idCount } : {}),
       ...(omittedRows > 0 ? { omitted_rows: omittedRows } : {}),
-      hint: omittedRows > 0
-        ? `Only ${kept.length} of ${rows.length} rows fit. Ask again with fewer fields, or with page_size=${kept.length} starting from page 1.`
-        : detailHint,
-    };
+      hint,
+    } : undefined;
     return JSON.stringify({
       ...envelope,
-      returned: kept.length,
+      // Dropped rows are still unread, even on the backend's last page.
+      has_more: envelope.has_more || omittedRows > 0,
+      returned: results.length,
       ...(envelope.has_more && omittedRows === 0 ? { next_page: envelope.page + 1 } : {}),
       ...(truncated ? { truncated } : {}),
-      results: cap === undefined ? kept : truncateStrings(kept, cap),
+      results,
     });
   };
 
-  let cap: number | undefined;
-  let text = render(rows);
+  let cap = budget.previewChars;
+  let shortened = shortenRows(cap);
+  let text = render(shortened, cap, rows.length);
   for (const stringCap of budget.stringCaps) {
     if (text.length <= budget.maxChars) return text;
     cap = stringCap;
-    text = render(rows, cap);
+    shortened = shortenRows(cap);
+    text = render(shortened, cap, rows.length);
   }
-  let kept = rows.length;
-  while (text.length > budget.maxChars && kept > 1) {
-    kept = Math.max(1, Math.floor(kept * 0.8));
-    text = render(rows.slice(0, kept), cap);
+  if (text.length <= budget.maxChars) return text;
+
+  // Reduce rows to their ids from the end: find the most full rows that fit
+  // by per-row length, then step down while the page (whose note grows) is over.
+  const fullLengths = shortened.map((row) => JSON.stringify(row.full).length);
+  const idLengths = shortened.map((row) => JSON.stringify(row.ids).length);
+  let total = text.length - fullLengths.reduce((sum, n) => sum + n, 0) + idLengths.reduce((sum, n) => sum + n, 0);
+  let fullCount = 0;
+  while (fullCount < rows.length && total + fullLengths[fullCount] - idLengths[fullCount] <= budget.maxChars) {
+    total += fullLengths[fullCount] - idLengths[fullCount];
+    fullCount++;
+  }
+  for (; fullCount >= 0; fullCount--) {
+    text = render(shortened, cap, fullCount);
+    if (text.length <= budget.maxChars) return text;
+  }
+
+  // Even id-only rows do not fit: keep as many as do.
+  let idCount = rows.length;
+  while (idCount > 0 && text.length > budget.maxChars) {
+    idCount--;
+    text = render(shortened, cap, 0, idCount);
   }
   return text;
 }

@@ -12,7 +12,7 @@ import {
   omitKeys,
   readListPage,
   textResult,
-  truncateStrings,
+  type PageBudget,
 } from "../shared/tool-result.js";
 import {
   environmentShape,
@@ -72,10 +72,19 @@ export const LOG_SORT_OPTIONS = [
 
 export const LOG_STATUSES = ["success", "failed"] as const;
 
-/** Longest string a log_list row keeps (error_message is the long one). */
-const LOG_PREVIEW_CHARS = 300;
-/** Under Claude Code's 10k-token warning; strings shrink before rows are dropped. */
-const LOG_LIST_BUDGET = { maxChars: 40_000, stringCaps: [120, 60] };
+/**
+ * Strings are cut to 300 chars (error_message is the long one), then shrink
+ * before rows are reduced to ids. Ids and filterable names stay whole so
+ * log_get, trace_get and the filters can take them back. 40k chars of id- and
+ * digit-heavy JSON is roughly 13-16k tokens.
+ */
+const LOG_LIST_BUDGET: PageBudget = {
+  maxChars: 40_000,
+  previewChars: 300,
+  stringCaps: [120, 60],
+  keepWhole: ["unique_id", "trace_unique_id", "thread_identifier", "customer_identifier", "prompt_name", "model", "span_name"],
+  smallerRowsHint: "Asking without `fields` (metadata is the large one) or with a smaller page_size fits more full rows.",
+};
 const LOG_LIST_DETAIL_HINT = "Long text was shortened. Call log_get with a row's unique_id for the full request.";
 const LOG_DETAIL_BUDGET = { maxChars: 40_000, stringCaps: [4_000, 1_500, 500] };
 
@@ -89,7 +98,7 @@ function projectLogRow(row: unknown, fields: readonly string[]): Record<string, 
   if (projected.unique_id === undefined && source.id !== undefined) {
     projected.unique_id = source.id;
   }
-  return truncateStrings(projected, LOG_PREVIEW_CHARS) as Record<string, unknown>;
+  return projected;
 }
 
 export function registerLogTools(server: McpServer, client: AuthenticatedClient | null) {
@@ -101,7 +110,7 @@ export function registerLogTools(server: McpServer, client: AuthenticatedClient 
 
 Returns one page of compact rows (default ${LOG_PAGE_SIZE_DEFAULT}, up to ${LOG_PAGE_SIZE_MAX}): ${LOG_LIST_FIELDS.join(", ")}. Add columns with \`fields\`. Message text is not included: call log_get with a row's unique_id to read the full input and output.
 
-Each page says how many rows it returned, whether anything was shortened (\`truncated\`), and \`next_page\` when there are more. Defaults to the last 24 hours. The result has no total count: for totals over a period (request count, cost, error rate) use dashboard_llm_metrics_summary instead of paging through rows.`,
+Each page says how many rows it returned, whether anything was shortened or dropped (\`truncated\`), and \`next_page\` when there are more. When paging, send back the start_time and end_time the page reports. Defaults to the last 24 hours. The result has no total count: for totals over a period (request count, cost, error rate) use dashboard_llm_metrics_summary instead of paging through rows.`,
       inputSchema: {
         ...timeWindowShape,
         ...environmentShape,

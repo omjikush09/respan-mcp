@@ -136,7 +136,7 @@ What is happening in your app. Every tool here is read-only and defaults to the 
 | `dashboard_top_models` | Rank models by requests, cost, tokens, errors or latency |
 | `end_user_rank_by_usage` | Rank your app's end users the same way |
 
-Results leave out Respan-internal fields (org and key IDs, pricing internals, storage keys, raw request copies) and long text is shortened to keep each result small.
+Results leave out Respan-internal fields (org and key IDs, pricing internals, storage keys, raw request copies) and long text is shortened to keep each result small. `log_list` and `trace_list` pages say what they cut: `returned`, and a `truncated` note when text was shortened or, as a last resort, the last rows were reduced to their IDs. IDs and names you can filter on are never shortened, so a row can always be read in full with `log_get` or `trace_get`. When paging, pass back the `start_time` and `end_time` the page reports.
 
 ### Behaviors and errors
 
