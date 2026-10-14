@@ -188,6 +188,7 @@ export function budgetedPage(
     const omittedRows = rows.length - results.length;
     const isShortened = shortened.slice(0, fullCount).some((row) => row.isCut);
     const hint = [
+      isShortened ? "Long text was shortened." : undefined,
       isShortened || idCount > 0 ? detailHint : undefined,
       idCount > 0 ? `The last ${idCount} rows did not fit and show only their ids.` : undefined,
       omittedRows > 0 ? `The last ${omittedRows} rows did not fit at all; ask for this page again with a smaller page_size.` : undefined,

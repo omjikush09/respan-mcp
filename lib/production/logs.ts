@@ -85,7 +85,7 @@ const LOG_LIST_BUDGET: PageBudget = {
   keepWhole: ["unique_id", "trace_unique_id", "thread_identifier", "customer_identifier", "prompt_name", "model", "span_name"],
   smallerRowsHint: "Asking without `fields` (metadata is the large one) or with a smaller page_size fits more full rows.",
 };
-const LOG_LIST_DETAIL_HINT = "Long text was shortened. Call log_get with a row's unique_id for the full request.";
+const LOG_LIST_DETAIL_HINT = "Call log_get with a row's unique_id for the full request.";
 const LOG_DETAIL_BUDGET = { maxChars: 40_000, stringCaps: [4_000, 1_500, 500] };
 
 function projectLogRow(row: unknown, fields: readonly string[]): Record<string, unknown> {

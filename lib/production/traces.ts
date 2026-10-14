@@ -181,7 +181,7 @@ const TRACE_LIST_BUDGET: PageBudget = {
   keepWhole: ["trace_unique_id", "name", "customer_identifier", "model"],
   smallerRowsHint: "A smaller page_size fits more full rows.",
 };
-const TRACE_LIST_DETAIL_HINT = "Previews were shortened. Call trace_get with a trace_unique_id to see every span.";
+const TRACE_LIST_DETAIL_HINT = "Call trace_get with a trace_unique_id to see every span.";
 const TRACE_DETAIL_BUDGET = { maxChars: 60_000, stringCaps: [2_000, 600, 200] };
 
 function projectTraceRow(row: unknown): Record<string, unknown> {

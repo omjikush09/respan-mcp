@@ -241,6 +241,18 @@ describe('log_list', () => {
     expect(text.length + fullRow).toBeGreaterThan(40_000);
   });
 
+  it('does not claim text was shortened when only rows were reduced', async () => {
+    const metadata = Object.fromEntries(Array.from({ length: 200 }, (_, k) => [`key_${k}`, 'm'.repeat(40)]));
+    const rows = Array.from({ length: 100 }, (_, i) => ({ id: `log-${i}`, trace_unique_id: `trace-${i}`, metadata }));
+    const { client } = fakeClient({ results: rows, next: 'https://api.example.invalid/?page=2' });
+    const { log_list } = captureTools(client);
+    const result = parsed(await log_list.handler({ page_size: 100, fields: ['metadata'] }));
+    expect(result.truncated.rows_reduced_to_ids).toBeGreaterThan(0);
+    expect(result.truncated).not.toHaveProperty('strings_shortened_to');
+    expect(result.truncated.hint).toContain('log_get');
+    expect(result.truncated.hint).not.toContain('shortened');
+  });
+
   it('reports the preview cut even when the page fits', async () => {
     const { client } = fakeClient({ results: [{ id: 'log-1', error_message: 'e'.repeat(2_000) }] });
     const { log_list } = captureTools(client);
