@@ -6,7 +6,7 @@ export const TOOL_CATEGORY_META_KEY = 'respan/category';
 
 export const TOOL_CATEGORIES = [
   'workspace', 'traces', 'logs', 'metrics', 'behaviors',
-  'errors', 'monitors', 'prompts', 'docs',
+  'errors', 'guardrails', 'monitors', 'prompts', 'docs',
 ] as const;
 export type ToolCategory = typeof TOOL_CATEGORIES[number];
 
@@ -20,6 +20,7 @@ export function toolCategory(name: string): ToolCategory {
     org: 'workspace', trace: 'traces', log: 'logs',
     monitor: 'monitors', notification: 'monitors', prompt: 'prompts',
     behavior: 'behaviors', error: 'errors', incident: 'errors', metrics: 'metrics',
+    guardrail: 'guardrails',
     user: 'metrics', workspace: 'workspace',
     docs: 'docs',
   };
