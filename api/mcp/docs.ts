@@ -1,3 +1,4 @@
+import { applyToolCatalog } from '../../lib/shared/tool-catalog.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { VercelRequest, VercelResponse } from '@vercel/node';
@@ -32,6 +33,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       version: '1.0.0',
     });
     applyToolPolicy(server);
+  applyToolCatalog(server);
     // The docs server needs no credential, so every caller counts as 'none'.
     const telemetry = telemetryContext('docs', undefined, req.headers, false);
     instrumentToolCalls(server, telemetry);
