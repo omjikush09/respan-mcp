@@ -1,3 +1,6 @@
+import { registerMonitorTools } from "../develop/monitors.js";
+import { applyProductVocabulary } from './product-vocabulary.js';
+import { applyToolCatalog } from './tool-catalog.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import type { VercelRequest, VercelResponse } from '@vercel/node';
@@ -6,11 +9,6 @@ import type { AuthenticatedClient } from './client.js';
 import { registerProductionTools } from '../production/index.js';
 import { registerPulseTools } from '../pulses/index.js';
 import { registerPromptTools } from '../develop/prompts.js';
-import { registerExperimentTools } from '../develop/experiments.js';
-import { registerEvaluatorTools } from '../evaluate/evaluators.js';
-import { registerDatasetTools } from '../evaluate/datasets.js';
-import { registerEvaluationPipelineTools } from '../evaluate/pipelines.js';
-import { registerWorkflowTools } from '../develop/workflows.js';
 import { registerOrganizationTools } from '../account/organizations.js';
 import { applyToolPolicy } from './tool-policy.js';
 import { resolveToolName, rewriteToolCallNames } from './tool-aliases.js';
@@ -33,16 +31,19 @@ export function createServer(
     version: '1.0.0',
   });
   applyToolPolicy(server);
+  applyProductVocabulary(server);
+  applyToolCatalog(server);
 
   if (enabledTools?.size) {
+    const enabledNames = new Set([...enabledTools].map(resolveToolName));
     const originalTool = server.tool.bind(server);
     (server as any).tool = function (name: string) {
-      if (!enabledTools.has(name)) return;
+      if (!enabledNames.has(resolveToolName(name))) return;
       return originalTool.apply(server, arguments as any);
     };
     const originalRegisterTool = (server as any).registerTool.bind(server);
     (server as any).registerTool = function (name: string) {
-      if (!enabledTools.has(name)) return;
+      if (!enabledNames.has(resolveToolName(name))) return;
       return originalRegisterTool.apply(server, arguments as any);
     };
   }
@@ -50,11 +51,7 @@ export function createServer(
   registerProductionTools(server, client);
   registerPulseTools(server, client);
   registerPromptTools(server, client);
-  registerExperimentTools(server, client);
-  registerEvaluatorTools(server, client);
-  registerDatasetTools(server, client);
-  registerEvaluationPipelineTools(server, client);
-  registerWorkflowTools(server, client);
+  registerMonitorTools(server, client);
   registerOrganizationTools(server, client);
   return server;
 }
