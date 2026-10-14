@@ -108,17 +108,106 @@ export function guardErrorResult(error: FilterGuardError) {
   };
 }
 
+/** How a condition joins the previous condition on the same field. */
+export const FILTER_CONNECTORS = ["AND", "OR"] as const;
+export type FilterConnector = (typeof FILTER_CONNECTORS)[number];
+const CONNECTOR_OR: FilterConnector = "OR";
+
+/** One backend filter leaf: `{ operator, value }`, plus `connector` inside a list. */
+export interface BackendCondition {
+  operator: string;
+  value: unknown;
+  connector?: FilterConnector;
+}
+
 /**
- * Converts the tool-facing `filters` array into the backend body shape
- * `{ field: { operator, value } }`. Run `filterGuardError` first.
+ * The backend body shape: per field, one condition object or a list of them
+ * (each list item AND-ed with the previous one unless its connector says OR),
+ * or a filter bundle `{ connector, filter_params }`.
  */
-export function toBackendFilters(
-  filters: ReadonlyArray<{ field: string; operator?: string; value: unknown[] }> | undefined,
-): Record<string, { operator: string; value: unknown[] }> | undefined {
+export type BackendFilterBody = Record<string, BackendCondition | BackendCondition[] | BackendFilterBundle>;
+
+export interface BackendFilterBundle {
+  connector: FilterConnector;
+  filter_params: Record<string, BackendCondition[]>;
+}
+
+/**
+ * Key prefix for a field whose conditions contain an OR. The backend joins an
+ * OR list item to the previous root condition, whatever its field, and SQL
+ * binds AND tighter than OR, so `latency > 9 AND cost > 1 OR cost < 0.01`
+ * would match every cheap log at any latency. Sending the field's conditions
+ * as their own bundle parenthesizes them and AND-s the group with the rest. A
+ * bundle's key is not a field, so the field's own key stays free for
+ * convenience params.
+ */
+export const OR_GROUP_KEY_PREFIX = "or_group__";
+
+type FilterInput = { field: string; operator?: string; value: unknown[]; connector?: FilterConnector };
+
+/**
+ * Adds an AND condition on `field`, keeping any condition already there: one
+ * condition stays a single object, a second turns the field into a list.
+ */
+export function addFilterCondition(filters: BackendFilterBody, field: string, condition: BackendCondition): void {
+  const existing = filters[field];
+  if (existing === undefined) {
+    filters[field] = condition;
+  } else if (Array.isArray(existing)) {
+    existing.push(condition);
+  } else {
+    filters[field] = [existing as BackendCondition, condition];
+  }
+}
+
+/**
+ * Fields, sorted, where a condition after the field's first has connector OR
+ * (on the first condition a connector has nothing to join, so it is ignored).
+ */
+export function orConnectorFields(filters: ReadonlyArray<FilterInput> | undefined): string[] {
+  const seen = new Set<string>();
+  const ored = new Set<string>();
+  for (const f of filters ?? []) {
+    if (seen.has(f.field) && f.connector === CONNECTOR_OR) ored.add(f.field);
+    seen.add(f.field);
+  }
+  return [...ored].sort();
+}
+
+/**
+ * Converts the tool-facing `filters` array into the backend body shape.
+ * Run `filterGuardError` first.
+ *
+ * One condition on a field stays `{ field: { operator, value } }`. Several
+ * become a list in input order, AND-ed. A field with an OR connector (ignored
+ * on its first condition) is sent as a bundle under `or_group__<field>`.
+ */
+export function toBackendFilters(filters: ReadonlyArray<FilterInput> | undefined): BackendFilterBody | undefined {
   if (!filters || filters.length === 0) return undefined;
-  const body: Record<string, { operator: string; value: unknown[] }> = {};
+  const byField = new Map<string, FilterInput[]>();
   for (const f of filters) {
-    body[f.field] = { value: f.value, operator: f.operator || "" };
+    const group = byField.get(f.field);
+    if (group) group.push(f);
+    else byField.set(f.field, [f]);
+  }
+
+  const oredFields = new Set(orConnectorFields(filters));
+  const body: BackendFilterBody = {};
+  for (const [field, conditions] of byField) {
+    if (!oredFields.has(field)) {
+      for (const f of conditions) addFilterCondition(body, field, { operator: f.operator || "", value: f.value });
+      continue;
+    }
+    body[OR_GROUP_KEY_PREFIX + field] = {
+      connector: "AND",
+      filter_params: {
+        [field]: conditions.map((f, index) => ({
+          operator: f.operator || "",
+          value: f.value,
+          ...(index > 0 && f.connector ? { connector: f.connector } : {}),
+        })),
+      },
+    };
   }
   return body;
 }

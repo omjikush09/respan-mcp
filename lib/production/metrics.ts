@@ -4,6 +4,13 @@ import { z } from "zod";
 import type { AuthenticatedClient } from "../shared/client.js";
 import { rawFetch, requireClient } from "../shared/client.js";
 import {
+  FILTER_CONNECTORS,
+  VALIDATION_ERROR_CODE,
+  addFilterCondition,
+  toBackendFilters,
+  type BackendFilterBody,
+} from "../shared/filter-fields.js";
+import {
   INTERNAL_RESPONSE_KEYS,
   READ_ONLY_WORKSPACE_TOOL,
   budgetedJson,
@@ -12,6 +19,7 @@ import {
 } from "../shared/tool-result.js";
 import {
   environmentShape,
+  filterConditionSchema,
   resolveTimeWindow,
   timeWindowShape,
   type BackendFilters,
@@ -48,6 +56,40 @@ const RANK_LIMIT_DEFAULT = 10;
 const RANK_LIMIT_MAX = 50;
 
 const METRICS_BUDGET = { maxChars: 20_000, stringCaps: [200] };
+
+/** The breakdown endpoint keeps only the latest 90 days of a longer window (backend MAX_TIME_SERIES_RANGE). */
+const RANK_MAX_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;
+
+/** The window the endpoint actually aggregates, so the echoed range matches the numbers. */
+function clampRankWindow(window: { start_time: string; end_time: string }) {
+  const earliest = Date.parse(window.end_time) - RANK_MAX_WINDOW_MS;
+  if (Date.parse(window.start_time) >= earliest) return window;
+  return { ...window, start_time: new Date(earliest).toISOString(), requested_start_time: window.start_time };
+}
+
+/**
+ * log_list filters the breakdown endpoint cannot compile: behaviors, topics
+ * and fault_domain are resolved by the log list view, and messages_smart by
+ * the summary view, before ClickHouse. Sent here they fail (HTTP 500) or
+ * match nothing with HTTP 200. Organization scope comes from the credential.
+ */
+const GROUPED_UNSUPPORTED_FILTERS = [
+  "behaviors",
+  "topics",
+  "fault_domain",
+  "messages_smart",
+  "organization_id",
+  "unique_organization_id",
+];
+
+const groupedFilterSchema = filterConditionSchema(
+  "Log field, e.g. status_code, latency, cost, customer_identifier, or 'metadata__<key>'.",
+).extend({
+  connector: z
+    .enum(FILTER_CONNECTORS)
+    .optional()
+    .describe("Joins this condition to the previous one on the same field: 'AND' (default) or 'OR'."),
+});
 
 const providerIdSchema = z
   .string()
@@ -97,13 +139,14 @@ async function rankBy(
     sort_by?: (typeof RANK_METRICS)[number];
     limit?: number;
   },
-  filters: BackendFilters,
+  filters: BackendFilterBody,
 ) {
-  const window = resolveTimeWindow(args);
+  const window = clampRankWindow(resolveTimeWindow(args));
   const sortBy = args.sort_by ?? "number_of_requests";
   const result = await rawFetch(client, "/api/dashboard/breakdown/", {
     query: {
-      ...window,
+      start_time: window.start_time,
+      end_time: window.end_time,
       environment: args.environment,
       breakdown_by: breakdownBy,
       include_all_metrics: "true",
@@ -162,21 +205,40 @@ To compare periods, call it once per period with windows of equal length. Defaul
       title: "Grouped metrics",
       description: `Compare supported groups by requests, cost, tokens, errors or latency. Select model, provider, end user, prompt or deployment as group_by. Defaults to model for compatibility.
 
-Defaults to the last 24 hours, ranked by number of requests.`,
+filters narrows the requests first, e.g. status_code 429 for rate limits per model. Filtered reads use raw logs, which can have shorter retention than unfiltered totals. Defaults to the last 24 hours, ranked by number of requests; covers at most the latest 90 days.`,
       inputSchema: {
         ...timeWindowShape,
         ...environmentShape,
         provider_id: providerIdSchema,
         group_by: z.enum(["model", "provider_id", "customer_identifier", "prompt_id", "deployment_id"]).optional().describe("Grouping dimension; default model."),
+        filters: z
+          .array(groupedFilterSchema)
+          .optional()
+          .describe("Only count requests matching all of these; log_list's fields except behaviors, topics and fault_domain. Repeat a field for a range (latency gte 1, then latency lte 5); connector 'OR' on a repeat ORs it with that field's previous condition."),
         ...rankShape,
       },
       annotations: READ_ONLY_WORKSPACE_TOOL,
     },
     async (args) => {
       const c = requireClient(client);
-      return rankBy(c, args.group_by ?? "model", args, dashboardFilters({
-        provider_id: { operator: "", value: args.provider_id },
-      }));
+      const unsupported = [...new Set((args.filters ?? []).map((f) => f.field))]
+        .filter((field) => GROUPED_UNSUPPORTED_FILTERS.includes(field))
+        .sort();
+      if (unsupported.length > 0) {
+        const error = {
+          status: "error",
+          error: {
+            message: `metrics_grouped cannot filter by ${unsupported.join(", ")}. Use log_list for behaviors, topics or fault_domain; workspace scope comes from your credential.`,
+            code: VALIDATION_ERROR_CODE,
+            unsupported_fields: unsupported,
+          },
+        };
+        return { isError: true as const, content: [{ type: "text" as const, text: JSON.stringify(error, null, 2) }] };
+      }
+      // provider_id adds an AND condition; it never replaces a filters condition.
+      const filters: BackendFilterBody = { ...toBackendFilters(args.filters) };
+      if (args.provider_id) addFilterCondition(filters, "provider_id", { operator: "", value: args.provider_id });
+      return rankBy(c, args.group_by ?? "model", args, filters);
     },
   );
 

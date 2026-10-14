@@ -7,6 +7,7 @@ import {
   filterGuardError,
   guardErrorResult,
   toBackendFilters,
+  type BackendFilterBody,
   type FilterFieldSpec,
 } from "../shared/filter-fields.js";
 import {
@@ -25,7 +26,6 @@ import {
   resolvePage,
   resolveTimeWindow,
   timeWindowShape,
-  type BackendFilters,
 } from "./params.js";
 
 // ---------------------------------------------------------------------------
@@ -218,7 +218,7 @@ Defaults to the last 24 hours, newest first.`,
       const window = resolveTimeWindow(args);
       const { page, pageSize } = resolvePage(args, TRACE_PAGE_SIZE_DEFAULT, TRACE_PAGE_SIZE_MAX);
 
-      const filters: BackendFilters = { ...toBackendFilters(args.filters) };
+      const filters: BackendFilterBody = { ...toBackendFilters(args.filters) };
       if (args.customer_identifier) {
         filters.customer_identifier = { operator: "", value: [args.customer_identifier] };
       }

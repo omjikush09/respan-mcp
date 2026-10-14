@@ -96,6 +96,55 @@ describe('feature-oriented MCP contracts', () => {
     } finally { await client.close(); }
   });
 
+  it('sends metrics_grouped filters as AND lists and OR bundles, with provider_id added as an AND', async () => {
+    const { client, call } = await fixture([{ body: { number_of_requests: [{ model: 'gpt-4o', number_of_requests: 3, total_cost: 1, unknown: 'x' }] } }]);
+    try {
+      const result = await client.callTool({ name: 'metrics_grouped', arguments: { ...window, provider_id: 'openai', filters: [
+        { field: 'latency', operator: 'gte', value: [1] },
+        { field: 'latency', operator: 'lte', value: [5] },
+        { field: 'status_code', operator: '', value: [200] },
+        { field: 'status_code', operator: '', value: [429], connector: 'OR' },
+        { field: 'provider_id', operator: 'not', value: ['azure'] },
+      ] } });
+      expect(call().body).toEqual({ filters: {
+        latency: [{ operator: 'gte', value: [1] }, { operator: 'lte', value: [5] }],
+        or_group__status_code: { connector: 'AND', filter_params: { status_code: [{ operator: '', value: [200] }, { operator: '', value: [429], connector: 'OR' }] } },
+        provider_id: [{ operator: 'not', value: ['azure'] }, { operator: '', value: 'openai' }],
+      } });
+      expect(JSON.parse((result.content as any)[0].text).results).toEqual([{ model: 'gpt-4o', number_of_requests: 3, total_cost: 1 }]);
+    } finally { await client.close(); }
+  });
+
+  it('keeps metrics_grouped unfiltered without filters', async () => {
+    const { client, call } = await fixture();
+    try {
+      await client.callTool({ name: 'metrics_grouped', arguments: window });
+      expect(call().body).toEqual({ filters: {} });
+    } finally { await client.close(); }
+  });
+
+  it('rejects metrics_grouped filters the breakdown endpoint cannot compile before issuing a request', async () => {
+    const { client, fetch } = await fixture();
+    try {
+      for (const field of ['behaviors', 'topics', 'fault_domain', 'messages_smart', 'unique_organization_id', 'organization_id']) {
+        const result = await client.callTool({ name: 'metrics_grouped', arguments: { ...window, filters: [{ field, operator: '', value: ['x'] }] } });
+        expect(result.isError).toBe(true);
+        expect(JSON.parse((result.content as any)[0].text).error).toMatchObject({ code: 'validation_error', unsupported_fields: [field] });
+      }
+      expect(fetch).not.toHaveBeenCalled();
+    } finally { await client.close(); }
+  });
+
+  it('echoes the 90-day window the breakdown endpoint actually aggregates', async () => {
+    const { client, call } = await fixture();
+    try {
+      const result = await client.callTool({ name: 'metrics_grouped', arguments: { start_time: '2026-01-01T00:00:00Z', end_time: '2026-10-01T00:00:00Z' } });
+      expect(call().query).toMatchObject({ start_time: '2026-07-03T00:00:00.000Z', end_time: '2026-10-01T00:00:00.000Z' });
+      expect(JSON.parse((result.content as any)[0].text)).toMatchObject({ start_time: '2026-07-03T00:00:00.000Z', requested_start_time: '2026-01-01T00:00:00.000Z' });
+      expect(call().query).not.toHaveProperty('requested_start_time');
+    } finally { await client.close(); }
+  });
+
   it('resolves behavior settings writes from the current session and exposes only the disabled list', async () => {
     const { client, call } = await fixture([
       { body: { unique_organization_id: 'own-org', disabled_span_behaviors: ['refusal'], secret: 'private' } },

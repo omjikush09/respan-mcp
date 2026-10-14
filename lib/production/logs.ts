@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { AuthenticatedClient } from "../shared/client.js";
 import { rawFetch, requireClient } from "../shared/client.js";
-import { toBackendFilters } from "../shared/filter-fields.js";
+import { toBackendFilters, type BackendFilterBody } from "../shared/filter-fields.js";
 import {
   INTERNAL_RESPONSE_KEYS,
   READ_ONLY_WORKSPACE_TOOL,
@@ -20,7 +20,6 @@ import {
   resolvePage,
   resolveTimeWindow,
   timeWindowShape,
-  type BackendFilters,
 } from "./params.js";
 
 const LOG_PAGE_SIZE_DEFAULT = 5;
@@ -108,7 +107,7 @@ Defaults to the last 24 hours. The result has no total count: for totals over a 
       const window = resolveTimeWindow(args);
       const { page, pageSize } = resolvePage(args, LOG_PAGE_SIZE_DEFAULT, LOG_PAGE_SIZE_MAX);
 
-      const filters: BackendFilters = { ...toBackendFilters(args.filters) };
+      const filters: BackendFilterBody = { ...toBackendFilters(args.filters) };
       if (args.model) filters.model = { operator: "icontains", value: [args.model] };
       if (args.status) filters.status = { operator: "", value: [args.status] };
       if (args.customer_identifier) {
