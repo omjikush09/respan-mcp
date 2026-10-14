@@ -16,6 +16,8 @@
 import { createHash } from 'node:crypto';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { resolveToolName } from './tool-aliases.js';
+import { TOOL_CATEGORY_META_KEY } from './tool-catalog.js';
 
 export const TOOL_CALL_EVENT = 'mcp.tool_call';
 export const SESSION_INIT_EVENT = 'mcp.session_init';
@@ -49,10 +51,18 @@ export interface TelemetryContext {
   sessionKey?: string;
   userAgent?: string;
   protocolVersion?: string;
+  /** JSON-RPC id → the old tool name a tools/call used; see noteAliasedCalls. */
+  aliasedCalls?: Map<unknown, string>;
 }
 
 interface ToolCallFields {
+  /** The current (product) name, after any old name was rewritten. */
   tool: string;
+  /** The tool's `respan/category`; absent for a tool this server lacks. */
+  category?: string;
+  alias_used: boolean;
+  /** The old name the client sent, when `alias_used`. */
+  alias?: string;
   status: ToolCallStatus;
   latency_ms?: number;
   result_chars?: number;
@@ -131,6 +141,22 @@ export function telemetryContext(
   };
 }
 
+/**
+ * Notes which tools/call messages in a request body use an old tool name,
+ * keyed by JSON-RPC id. Call it just before rewriteToolCallNames, which
+ * replaces those names, so each tool_call event can say an alias was used.
+ */
+export function noteAliasedCalls(ctx: TelemetryContext, body: unknown): void {
+  const messages = Array.isArray(body) ? body : [body];
+  for (const message of messages) {
+    const { method, id, params } = (message ?? {}) as { method?: unknown; id?: unknown; params?: { name?: unknown } };
+    if (method !== 'tools/call' || typeof params?.name !== 'string') continue;
+    if (resolveToolName(params.name) === params.name) continue;
+    ctx.aliasedCalls ??= new Map();
+    ctx.aliasedCalls.set(id, params.name);
+  }
+}
+
 function lengthOf(value: unknown): number {
   return typeof value === 'string' ? value.length : 0;
 }
@@ -193,7 +219,7 @@ function wrapCallback(callback: Function): Function {
   };
 }
 
-function statusOf(name: string, names: Set<string>, record: CallRecord, result: unknown): ToolCallStatus {
+function statusOf(name: string, names: Map<string, unknown>, record: CallRecord, result: unknown): ToolCallStatus {
   if (record.threw) return 'exception';
   const isError = Boolean((result as { isError?: unknown })?.isError);
   if (!record.ran && isError) return names.has(name) ? 'invalid_arguments' : 'unknown_tool';
@@ -213,7 +239,8 @@ export function instrumentToolCalls(server: McpServer, ctx: TelemetryContext): v
   if ((server as any)._toolHandlersInitialized) {
     throw new Error('instrumentToolCalls must run before any tool is registered');
   }
-  const names = new Set<string>();
+  /** Registered tool name → its `respan/category`, if the catalog set one. */
+  const categories = new Map<string, string | undefined>();
   let emitted = 0;
 
   for (const method of ['tool', 'registerTool'] as const) {
@@ -224,7 +251,13 @@ export function instrumentToolCalls(server: McpServer, ctx: TelemetryContext): v
         rest[last] = wrapCallback(rest[last] as Function);
       }
       const registered = original(name, ...rest);
-      if (registered) names.add(name);
+      if (registered) {
+        // Product vocabulary may have renamed it to its current name.
+        const current = resolveToolName(name);
+        const key = (server as any)._registeredTools?.[current] === registered ? current : name;
+        const category = registered._meta?.[TOOL_CATEGORY_META_KEY];
+        categories.set(key, typeof category === 'string' ? category : undefined);
+      }
       return registered;
     };
   }
@@ -238,11 +271,15 @@ export function instrumentToolCalls(server: McpServer, ctx: TelemetryContext): v
       const record: CallRecord = { ran: false, threw: false };
       callRecords.set(extra, record);
       const name = String(request?.params?.name ?? '');
+      const alias = ctx.aliasedCalls?.get(extra?.requestId);
       const log = (fields: Partial<ToolCallFields>) => {
         if (emitted >= MAX_TOOL_CALL_EVENTS_PER_SERVER) return;
         emitted += 1;
         emit(TOOL_CALL_EVENT, ctx, {
           tool: bounded(name) ?? '',
+          category: categories.get(name),
+          alias_used: alias !== undefined,
+          alias: bounded(alias),
           latency_ms: Math.round(performance.now() - started),
           arg_keys: argKeysOf(request?.params?.arguments),
           ...fields,
@@ -250,7 +287,7 @@ export function instrumentToolCalls(server: McpServer, ctx: TelemetryContext): v
       };
       try {
         const result = await handler(request, extra);
-        const status = statusOf(name, names, record, result);
+        const status = statusOf(name, categories, record, result);
         log(status === 'exception'
           ? { status, http_status: httpStatusOf(record.error), error_class: errorClassOf(record.error) }
           : { status, result_chars: status === 'ok' || status === 'tool_error' ? resultChars(result) : undefined });
@@ -270,10 +307,12 @@ export function instrumentToolCalls(server: McpServer, ctx: TelemetryContext): v
 
 /**
  * Logs what the request said outside of tool calls: the old tool names its
- * tools/call messages used before they were rewritten, and `initialize`,
- * which names the client. Call it after the transport has answered. A session
- * is logged only when the server completed the handshake (it then knows the
- * client) and the request was not refused afterwards (`isAccepted`).
+ * tools/call messages used before they were rewritten (also when the
+ * transport rejected the request, so no tool_call event was written), and
+ * `initialize`, which names the client. Call it after the transport has
+ * answered. A session is logged only when the server completed the handshake
+ * (it then knows the client) and the request was not refused afterwards
+ * (`isAccepted`).
  */
 export function recordRequest(
   server: McpServer,

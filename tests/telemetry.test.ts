@@ -159,6 +159,21 @@ describe('tool call telemetry', () => {
     expect(events()).toEqual([expect.objectContaining({ tool: 'log_list', status: 'unknown_tool' })]);
   });
 
+  it('records the category of a product tool registered under its backend name', async () => {
+    // org_switch is registered under its backend name and renamed workspace_switch.
+    const client = await connect(createServer(null, undefined, CTX));
+    const result = await client.callTool({ name: 'workspace_switch', arguments: {} });
+    await client.close();
+    expect(result.isError).toBe(true);
+    expect(events()).toEqual([expect.objectContaining({
+      tool: 'workspace_switch',
+      category: 'workspace',
+      status: 'invalid_arguments',
+      alias_used: false,
+    })]);
+    expect(events()[0]).not.toHaveProperty('alias');
+  });
+
   it('logs old tool names as one alias event, not as extra calls', () => {
     recordRequest(createServer(null), CTX, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'log_list' } }, ['list_logs'], false);
     expect(events()).toEqual([expect.objectContaining({ event: 'mcp.tool_alias', old_names: ['list_logs'] })]);
@@ -310,6 +325,27 @@ describe('hosted handler telemetry', () => {
     }), new MockResponse() as any);
 
     expect(events()).toEqual([]);
+  });
+
+  it('logs an aliased call under its current name, category and old name', async () => {
+    await handler(rpcRequest([
+      { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'org_switch', arguments: {} } },
+      { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'workspace_switch', arguments: {} } },
+    ]), new MockResponse() as any);
+
+    const calls = events().filter((event) => event.event === 'mcp.tool_call');
+    expect(calls).toEqual([
+      expect.objectContaining({
+        tool: 'workspace_switch',
+        category: 'workspace',
+        status: 'invalid_arguments',
+        alias_used: true,
+        alias: 'org_switch',
+      }),
+      expect.objectContaining({ tool: 'workspace_switch', category: 'workspace', alias_used: false }),
+    ]);
+    expect(calls[1]).not.toHaveProperty('alias');
+    expect(events()).toContainEqual(expect.objectContaining({ event: 'mcp.tool_alias', old_names: ['org_switch'] }));
   });
 
   it('logs old tool names even when the transport rejects the request', async () => {

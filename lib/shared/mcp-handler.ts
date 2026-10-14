@@ -14,6 +14,7 @@ import { applyToolPolicy } from './tool-policy.js';
 import { resolveToolName, rewriteToolCallNames } from './tool-aliases.js';
 import {
   instrumentToolCalls,
+  noteAliasedCalls,
   recordRequest,
   telemetryContext,
   type TelemetryContext,
@@ -228,6 +229,7 @@ export function createMcpHandler(
         sessionIdGenerator: undefined,
       });
       await server.connect(transport);
+      noteAliasedCalls(telemetry, req.body);
       const renamedTools = rewriteToolCallNames(req.body);
       const transportResponse = await transport.handleRequest(
         toWebRequest(req),

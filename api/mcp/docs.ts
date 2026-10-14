@@ -5,7 +5,12 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { registerDocTools } from '../../lib/docs/tools.js';
 import { applyToolPolicy } from '../../lib/shared/tool-policy.js';
 import { rewriteToolCallNames } from '../../lib/shared/tool-aliases.js';
-import { instrumentToolCalls, recordRequest, telemetryContext } from '../../lib/shared/telemetry.js';
+import {
+  instrumentToolCalls,
+  noteAliasedCalls,
+  recordRequest,
+  telemetryContext,
+} from '../../lib/shared/telemetry.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, s-maxage=0');
@@ -46,6 +51,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     await server.connect(transport);
 
+    noteAliasedCalls(telemetry, req.body);
     const renamedTools = rewriteToolCallNames(req.body);
     await transport.handleRequest(
       req as any,
