@@ -86,7 +86,7 @@ describe('/mcp/readonly with an API key', () => {
     const names = await toolNames(readOnlyHandler, API_KEY);
     expect(names).toContain('log_list');
     expect(names).toContain('trace_get');
-    for (const write of ['prompt_deploy', 'prompt_create', 'dataset_delete', 'grader_run', 'org_switch']) {
+    for (const write of ['prompt_deploy', 'prompt_create', 'monitor_delete', 'custom_behavior_delete', 'workspace_switch']) {
       expect(names, write).not.toContain(write);
     }
   });
@@ -95,7 +95,7 @@ describe('/mcp/readonly with an API key', () => {
     setSessionStoreForTests(new InMemorySessionStore());
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     const response = new MockResponse();
-    await readOnlyHandler(rpc(API_KEY, 'tools/call', { name: 'dataset_delete', arguments: {} }), response as any);
+    await readOnlyHandler(rpc(API_KEY, 'tools/call', { name: 'monitor_delete', arguments: {} }), response as any);
 
     const { result } = rpcResult(response);
     expect(result.isError).toBe(true);
@@ -111,7 +111,7 @@ describe('/mcp/readonly with an API key', () => {
     setSessionStoreForTests(new InMemorySessionStore());
     const request = rpc(API_KEY, 'tools/call', {});
     request.body = [
-      { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'dataset_delete', arguments: {} } },
+      { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'monitor_delete', arguments: {} } },
       { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'prompt_deploy', arguments: {} } },
     ];
     const response = new MockResponse();
