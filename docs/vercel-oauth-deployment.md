@@ -104,7 +104,8 @@ public broker boundary.
 An OAuth connection is read-only unless the user allows changes at consent.
 
 - `mcp:read` is always granted. It reaches the tools annotated `readOnlyHint: true`.
-- `mcp:write` reaches every other tool. It is granted only when the client asked for it, which a missing `scope` parameter counts as, and the user ticked "Also allow changes" on the login page.
+- `mcp:write` reaches every other tool: a tool whose `readOnlyHint` is false or missing counts as a write, so a new tool stays hidden from read-only sessions until it is marked read-only. `workspace_switch` is a write, because it changes the active organization for the whole account.
+- `mcp:write` is granted only when the client asked for it, which a missing `scope` parameter counts as, and the user ticked "Also allow changes" on the login page.
 - The granted scope is stored on the code and on the access and refresh sessions. It is returned as `scope` from `/token`, and a refresh carries it forward unchanged.
 - A read-only session does not list write tools. Calling one returns a tool error `insufficient_scope`, with `_meta["mcp/www_authenticate"]` so ChatGPT can offer a new consent.
 - API keys are not filtered here: the backend enforces each key's own permissions, and `["*:read"]` keys are read-only.

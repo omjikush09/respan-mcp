@@ -37,9 +37,6 @@ export const DESTRUCTIVE_TOOL: ToolAnnotations = {
 };
 const DESTRUCTIVE = DESTRUCTIVE_TOOL;
 
-/** Sends real notifications and webhooks, which cannot be taken back. */
-const SENDS_MESSAGES: ToolAnnotations = { ...DESTRUCTIVE, openWorldHint: true };
-
 export const TOOL_ANNOTATIONS: Readonly<Record<string, ToolAnnotations>> = {
   // Prompts (prompt_commit and prompt_deploy carry their own)
   prompt_list: READ,
@@ -50,63 +47,6 @@ export const TOOL_ANNOTATIONS: Readonly<Record<string, ToolAnnotations>> = {
   prompt_draft_init: WRITE,
   prompt_update: DESTRUCTIVE,
   prompt_version_update: DESTRUCTIVE,
-
-  // Experiments
-  experiment_list: READ,
-  experiment_get: READ,
-  experiment_logs_list: READ,
-  experiment_log_get: READ,
-  experiment_score_averages: READ,
-  experiment_create: WRITE,
-  experiment_delete: DESTRUCTIVE,
-
-  // Workflows
-  workflow_list: READ,
-  workflow_filter: READ,
-  workflow_get: READ,
-  workflow_versions_list: READ,
-  workflow_version_get: READ,
-  workflow_create: WRITE,
-  automation_create: WRITE,
-  monitor_create: WRITE,
-  export_workflow_create: WRITE,
-  workflow_draft_create: WRITE,
-  workflow_commit: WRITE,
-  workflow_update: DESTRUCTIVE,
-  workflow_deploy: DESTRUCTIVE,
-  workflow_undeploy: DESTRUCTIVE,
-  workflow_delete: DESTRUCTIVE,
-  workflow_validate: SENDS_MESSAGES,
-
-  // Datasets
-  dataset_list: READ,
-  dataset_get: READ,
-  dataset_logs_list: READ,
-  dataset_log_get: READ,
-  dataset_logs_summary: READ,
-  dataset_eval_runs_list: READ,
-  dataset_create: WRITE,
-  dataset_logs_import: WRITE,
-  dataset_logs_bulk_create: WRITE,
-  dataset_update: DESTRUCTIVE,
-  dataset_log_replace: DESTRUCTIVE,
-  dataset_logs_remove: DESTRUCTIVE,
-  dataset_delete: DESTRUCTIVE,
-
-  // Graders (single scoring units) and evaluators (pipelines built from them)
-  grader_list: READ,
-  grader_get: READ,
-  grader_versions_list: READ,
-  grader_create: WRITE,
-  grader_commit: WRITE,
-  // A dry run that saves nothing, but it makes a billed LLM call.
-  grader_run: WRITE,
-  grader_update: DESTRUCTIVE,
-  grader_delete: DESTRUCTIVE,
-  evaluator_list: READ,
-  evaluator_get: READ,
-  evaluator_create: WRITE,
-  evaluator_update: DESTRUCTIVE,
 
   // Account
   org_list: READ,
@@ -142,36 +82,32 @@ export function applyToolPolicy(server: McpServer): void {
 const hiddenWriteTools = new WeakMap<McpServer, Set<string>>();
 
 /**
- * For a read-only session: registers only tools annotated readOnlyHint: true.
- * A tool with no annotation counts as a write, so a new tool stays hidden from
- * read-only sessions until it is marked read-only on purpose. Apply it after
- * applyToolPolicy and before any filter that should run first.
+ * For a read-only session: removes every registered tool whose final
+ * annotations do not say readOnlyHint: true, and records its name. A tool
+ * with readOnlyHint false or no annotation at all counts as a write, so a new
+ * tool stays hidden from read-only sessions until it is marked read-only on
+ * purpose. Call it after every tool is registered, so it sees each tool's
+ * product name (after applyProductVocabulary) and its final annotations
+ * (after applyToolPolicy), whichever API registered it.
  */
-export function registerReadOnlyToolsOnly(server: McpServer): void {
+export function removeWriteTools(server: McpServer): void {
   const hidden = new Set<string>();
   hiddenWriteTools.set(server, hidden);
-  const originalTool = server.tool.bind(server);
-  (server as any).tool = function (name: string) {
-    if (TOOL_ANNOTATIONS[name]?.readOnlyHint !== true) {
-      hidden.add(name);
-      return undefined;
-    }
-    return originalTool.apply(server, arguments as any);
-  };
-  const originalRegisterTool = (server as any).registerTool.bind(server);
-  (server as any).registerTool = function (
-    name: string,
-    config?: { annotations?: ToolAnnotations },
-  ) {
-    if (config?.annotations?.readOnlyHint !== true) {
-      hidden.add(name);
-      return undefined;
-    }
-    return originalRegisterTool.apply(server, arguments as any);
-  };
+  // The SDK keeps registered tools by name and has no public way to list them.
+  // The entry is deleted by key, not with tool.remove(): remove() deletes the
+  // name the tool was first registered under, so a tool renamed by
+  // applyProductVocabulary (org_switch -> workspace_switch) would stay listed.
+  const registered = (server as unknown as {
+    _registeredTools: Record<string, { annotations?: ToolAnnotations }>;
+  })._registeredTools;
+  for (const [name, tool] of Object.entries(registered)) {
+    if (tool.annotations?.readOnlyHint === true) continue;
+    hidden.add(name);
+    delete registered[name];
+  }
 }
 
-/** Tools registerReadOnlyToolsOnly kept off `server`; empty when it was not applied. */
+/** Tools removeWriteTools took off `server`; empty when it was not applied. */
 export function hiddenWriteToolsOf(server: McpServer): ReadonlySet<string> {
   return hiddenWriteTools.get(server) ?? new Set();
 }

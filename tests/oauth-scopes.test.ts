@@ -13,7 +13,10 @@ import {
   requestedScope,
 } from '../lib/oauth/scopes.js';
 import { resetSessionStoreForTests, setSessionStoreForTests } from '../lib/oauth/store-factory.js';
-import { createMcpHandler } from '../lib/shared/mcp-handler.js';
+import { createMcpHandler, createServer } from '../lib/shared/mcp-handler.js';
+import { TOOL_ALIASES } from '../lib/shared/tool-aliases.js';
+import { hiddenWriteToolsOf, removeWriteTools } from '../lib/shared/tool-policy.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import authorizationServerMetadata from '../api/well-known/oauth-authorization-server.js';
 import protectedResourceMetadata from '../api/well-known/oauth-protected-resource.js';
 
@@ -225,7 +228,7 @@ describe('scopes on the hosted /mcp endpoint', () => {
     const names = await toolNames(pair.access_token);
     expect(names).toContain('log_list');
     expect(names).toContain('prompt_get');
-    for (const write of ['prompt_deploy', 'prompt_create', 'dataset_delete', 'workflow_deploy', 'org_switch']) {
+    for (const write of ['prompt_deploy', 'prompt_create', 'monitor_delete', 'behavior_settings_update', 'workspace_switch']) {
       expect(names, write).not.toContain(write);
     }
   });
@@ -270,7 +273,7 @@ describe('scopes on the hosted /mcp endpoint', () => {
     const request = rpc(pair.access_token, 'tools/call', {});
     request.body = [
       { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'prompt_deploy', arguments: {} } },
-      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'dataset_delete', arguments: {} } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'monitor_delete', arguments: {} } },
     ];
     const response = new MockResponse();
     await handler(request, response as any);
@@ -317,6 +320,103 @@ describe('scopes on the hosted /mcp endpoint', () => {
   it('does not filter API keys, whose permissions the backend enforces', async () => {
     setSessionStoreForTests(new InMemorySessionStore());
     expect(await toolNames('AbCdEfGh.0123456789abcdef0123456789abcdef')).toContain('prompt_deploy');
+  });
+});
+
+describe('the read-only gate covers the whole tool surface', () => {
+  const handler = createMcpHandler('https://api.respan.ai', '/.well-known/oauth-protected-resource', 'platform');
+  const API_KEY = 'AbCdEfGh.0123456789abcdef0123456789abcdef';
+
+  beforeEach(async () => {
+    process.env.OAUTH_SECRET = SECRET;
+    process.env.OAUTH_SESSION_STORE = 'memory';
+    process.env.MCP_PUBLIC_BASE_URL = 'https://mcp.respan.ai';
+    delete process.env[LEGACY_SCOPE_ENV];
+    resetOAuthConfigForTests();
+    await resetSessionStoreForTests();
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  async function listTools(credential: string): Promise<{ name: string; annotations?: { readOnlyHint?: boolean } }[]> {
+    const response = new MockResponse();
+    await handler(rpc(credential, 'tools/list', {}), response as any);
+    return rpcResult(response).result.tools;
+  }
+
+  async function readOnlyToken(): Promise<string> {
+    const store = new InMemorySessionStore();
+    setSessionStoreForTests(store);
+    return (await issue(store, { isWriteApproved: false })).pair.access_token;
+  }
+
+  /** Every tool on the full surface, split by its own readOnlyHint (false or missing = write). */
+  async function surface() {
+    const all = await listTools(API_KEY);
+    return {
+      all,
+      writes: all.filter((tool) => tool.annotations?.readOnlyHint !== true).map((tool) => tool.name),
+      reads: all.filter((tool) => tool.annotations?.readOnlyHint === true).map((tool) => tool.name),
+    };
+  }
+
+  it('lists none of the write tools, and every read tool, to a read-only session', async () => {
+    const { all, writes, reads } = await surface();
+    expect(all).toHaveLength(54);
+    for (const name of [
+      'monitor_create', 'monitor_update', 'monitor_delete', 'monitor_commit', 'monitor_deploy',
+      'monitor_undeploy', 'behavior_settings_update', 'workspace_switch', 'prompt_create',
+      'prompt_update', 'prompt_draft_init', 'prompt_draft_update', 'prompt_commit', 'prompt_deploy',
+      'custom_behavior_create', 'custom_behavior_update', 'custom_behavior_delete',
+    ]) expect(writes, name).toContain(name);
+
+    const listed = (await listTools(await readOnlyToken())).map((tool) => tool.name);
+    expect(listed.filter((name) => writes.includes(name))).toEqual([]);
+    expect([...listed].sort()).toEqual([...reads].sort());
+  });
+
+  it('refuses every write tool with insufficient_scope without calling the backend', async () => {
+    const { writes } = await surface();
+    const token = await readOnlyToken();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    for (const name of writes) {
+      const response = new MockResponse();
+      await handler(rpc(token, 'tools/call', { name, arguments: {} }), response as any);
+      const error = JSON.parse(rpcResult(response).result.content[0].text).error;
+      expect(error.code, name).toBe('insufficient_scope');
+      expect(error.message, name).toContain(name);
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('refuses every old name of a write tool with insufficient_scope', async () => {
+    const { writes } = await surface();
+    const aliases = Object.keys(TOOL_ALIASES).filter((old) => writes.includes(TOOL_ALIASES[old]));
+    expect(aliases).toEqual(expect.arrayContaining(['org_switch', 'switch_organization', 'deploy_prompt_version']));
+    const token = await readOnlyToken();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    for (const name of aliases) {
+      const response = new MockResponse();
+      await handler(rpc(token, 'tools/call', { name, arguments: {} }), response as any);
+      expect(JSON.parse(rpcResult(response).result.content[0].text).error.code, name).toBe('insufficient_scope');
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('records the product names it hid, not the registration names', () => {
+    const hidden = hiddenWriteToolsOf(createServer(null, undefined, true));
+    expect(hidden.has('workspace_switch')).toBe(true);
+    expect(hidden.has('org_switch')).toBe(false);
+  });
+
+  it('treats a tool with no annotations, or readOnlyHint false, as a write', () => {
+    const server = new McpServer({ name: 'gate-test', version: '1' });
+    server.registerTool('no_hints', { description: 'x' }, async () => ({ content: [] }));
+    server.registerTool('says_write', { description: 'x', annotations: { readOnlyHint: false } }, async () => ({ content: [] }));
+    server.registerTool('says_read', { description: 'x', annotations: { readOnlyHint: true } }, async () => ({ content: [] }));
+    removeWriteTools(server);
+    expect([...hiddenWriteToolsOf(server)].sort()).toEqual(['no_hints', 'says_write']);
+    expect(Object.keys((server as any)._registeredTools)).toEqual(['says_read']);
   });
 });
 
