@@ -350,6 +350,16 @@ describe('the read-only gate covers the whole tool surface', () => {
     return (await issue(store, { isWriteApproved: false })).pair.access_token;
   }
 
+  /**
+   * Every tool createServer registers. tools/list over HTTP must return all of
+   * them, so the gate is checked against the whole surface, however many tools
+   * other changes add or remove.
+   */
+  function registeredToolNames(): string[] {
+    const server = createServer(null) as unknown as { _registeredTools: Record<string, unknown> };
+    return Object.keys(server._registeredTools);
+  }
+
   /** Every tool on the full surface, split by its own readOnlyHint (false or missing = write). */
   async function surface() {
     const all = await listTools(API_KEY);
@@ -362,7 +372,7 @@ describe('the read-only gate covers the whole tool surface', () => {
 
   it('lists none of the write tools, and every read tool, to a read-only session', async () => {
     const { all, writes, reads } = await surface();
-    expect(all).toHaveLength(54);
+    expect(all.map((tool) => tool.name).sort()).toEqual(registeredToolNames().sort());
     for (const name of [
       'monitor_create', 'monitor_update', 'monitor_delete', 'monitor_commit', 'monitor_deploy',
       'monitor_undeploy', 'behavior_settings_update', 'workspace_switch', 'prompt_create',
