@@ -4,6 +4,7 @@
 // paging, and the advanced filter condition.
 
 import { z } from "zod";
+import { FILTER_CONNECTORS } from "../shared/filter-fields.js";
 
 /** EnvironmentChoices in the backend (utils/constants/environment_constants.py). */
 export const ENVIRONMENTS = ["prod", "stage", "test"] as const;
@@ -78,8 +79,11 @@ export const FILTER_OPERATORS = [
   "contains",
   "icontains",
   "startswith",
+  "not_startswith",
   "endswith",
   "isnull",
+  "empty",
+  "not_empty",
 ] as const;
 
 export function filterConditionSchema(fieldDescription: string) {
@@ -87,10 +91,14 @@ export function filterConditionSchema(fieldDescription: string) {
     field: z.string().describe(fieldDescription),
     operator: z
       .enum(FILTER_OPERATORS)
-      .describe("'' = equals, 'not' = not equal, 'in' = any of the values, 'lt'/'lte'/'gt'/'gte' = comparisons, 'icontains' = case-insensitive substring, 'isnull' = null check."),
+      .describe("'' = equals, 'not' = not equal, 'in' = any of the values, 'lt'/'lte'/'gt'/'gte' = comparisons, 'contains'/'icontains' = substring (icontains ignores case), 'startswith'/'not_startswith'/'endswith' = prefix or suffix, 'isnull' = null check (value [true] or [false]), 'empty'/'not_empty' = has no value / has a value (send value [true])."),
     value: z
       .array(z.union([z.string(), z.number(), z.boolean()]))
       .describe("Value(s) as an array, e.g. [5], ['gpt-4o'], [true]."),
+    connector: z
+      .enum(FILTER_CONNECTORS)
+      .optional()
+      .describe("Joins this condition to the previous one on the same field: 'AND' (default) or 'OR'."),
   });
 }
 

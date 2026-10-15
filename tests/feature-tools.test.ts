@@ -30,9 +30,9 @@ describe('feature-oriented MCP contracts', () => {
     try {
       const { tools } = await client.listTools();
       const names = tools.map(t => t.name);
-      expect(tools).toHaveLength(54);
+      expect(tools).toHaveLength(55);
       expect(new Set(tools.map(t => t._meta?.['respan/category'])).size).toBe(8);
-      for (const name of ['trace_summary', 'log_summary', 'behavior_summary', 'behavior_records', 'behavior_settings_get', 'behavior_settings_update', 'error_group_list', 'error_group_get', 'error_timeseries', 'incident_list', 'metrics_summary', 'metrics_timeseries', 'metrics_grouped', 'user_usage_list', 'monitor_alert_list', 'monitor_alert_timeseries', 'notification_destination_list', 'notification_destination_get', 'prompt_version_list', 'prompt_draft_update', 'workspace_current', 'workspace_list', 'workspace_switch']) expect(names).toContain(name);
+      for (const name of ['trace_summary', 'log_summary', 'log_filter_schema', 'behavior_summary', 'behavior_records', 'behavior_settings_get', 'behavior_settings_update', 'error_group_list', 'error_group_get', 'error_timeseries', 'incident_list', 'metrics_summary', 'metrics_timeseries', 'metrics_grouped', 'user_usage_list', 'monitor_alert_list', 'monitor_alert_timeseries', 'notification_destination_list', 'notification_destination_get', 'prompt_version_list', 'prompt_draft_update', 'workspace_current', 'workspace_list', 'workspace_switch']) expect(names).toContain(name);
       for (const name of ['thread_list', 'thread_get', 'pulse_behaviors_summary', 'org_list']) expect(names).not.toContain(name);
     } finally { await client.close(); }
   });

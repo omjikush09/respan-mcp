@@ -4,9 +4,13 @@ import { z } from "zod";
 import type { AuthenticatedClient } from "../shared/client.js";
 import { rawFetch, requireClient } from "../shared/client.js";
 import {
+  addFilterCondition,
   filterGuardError,
   guardErrorResult,
+  orConnectorFields,
   toBackendFilters,
+  VALIDATION_ERROR_CODE,
+  type BackendFilterBody,
   type FilterFieldSpec,
 } from "../shared/filter-fields.js";
 import {
@@ -25,7 +29,6 @@ import {
   resolvePage,
   resolveTimeWindow,
   timeWindowShape,
-  type BackendFilters,
 } from "./params.js";
 
 // ---------------------------------------------------------------------------
@@ -201,7 +204,7 @@ Defaults to the last 24 hours, newest first.`,
             `Trace field. Trace-level: ${TRACE_LEVEL_FILTER_FIELDS.join(", ")}. Span-level (matches if any span matches): ${SPAN_LEVEL_FILTER_FIELDS.join(", ")}. Content: ${TRACE_CONTENT_FILTER_FIELDS.join(", ")}. Custom metadata is not filterable on traces.`,
           ))
           .optional()
-          .describe("Advanced: extra conditions, all of which must match. Example: [{\"field\": \"duration\", \"operator\": \"gt\", \"value\": [30]}]."),
+          .describe("Advanced: extra conditions, all of which must match. Example: [{\"field\": \"duration\", \"operator\": \"gt\", \"value\": [30]}]. Repeat a field for a range (duration gt 30, then duration lt 60). connector OR is not supported here."),
         sort_by: z.enum(TRACE_SORT_OPTIONS).optional().describe("Sort order (default -timestamp, newest first). '-' means descending."),
         ...pageShape(TRACE_PAGE_SIZE_DEFAULT, TRACE_PAGE_SIZE_MAX),
       },
@@ -214,16 +217,32 @@ Defaults to the last 24 hours, newest first.`,
       // and returns a wider result set with HTTP 200.
       const guard = filterGuardError((args.filters ?? []).map((f) => f.field), TRACE_FILTER_FIELD_SPEC);
       if (guard) return guardErrorResult(guard);
+      // The traces endpoint refuses filter groups, which an OR needs to stay
+      // on its own field; say so in trace_list's terms instead.
+      const oredFields = orConnectorFields(args.filters);
+      if (oredFields.length > 0) {
+        return guardErrorResult({
+          status: "error",
+          error: {
+            message: `trace_list cannot OR conditions (connector 'OR' on: ${oredFields.join(", ")}); its conditions are always AND-ed. Make one trace_list call per alternative.`,
+            code: VALIDATION_ERROR_CODE,
+            unsupported_fields: oredFields,
+            supported_fields: [...TRACE_FILTER_FIELD_SPEC.fields].sort(),
+          },
+        });
+      }
 
       const window = resolveTimeWindow(args);
       const { page, pageSize } = resolvePage(args, TRACE_PAGE_SIZE_DEFAULT, TRACE_PAGE_SIZE_MAX);
 
-      const filters: BackendFilters = { ...toBackendFilters(args.filters) };
+      // Convenience params add an AND condition; they never replace a
+      // `filters` condition on the same field.
+      const filters: BackendFilterBody = { ...toBackendFilters(args.filters) };
       if (args.customer_identifier) {
-        filters.customer_identifier = { operator: "", value: [args.customer_identifier] };
+        addFilterCondition(filters, "customer_identifier", { operator: "", value: [args.customer_identifier] });
       }
-      if (args.name) filters.name = { operator: "", value: [args.name] };
-      if (args.errors_only) filters.error_count = { operator: "gt", value: [0] };
+      if (args.name) addFilterCondition(filters, "name", { operator: "", value: [args.name] });
+      if (args.errors_only) addFilterCondition(filters, "error_count", { operator: "gt", value: [0] });
 
       const result = await rawFetch(c, "/api/traces/list/", {
         query: {

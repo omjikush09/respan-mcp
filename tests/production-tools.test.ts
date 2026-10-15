@@ -2,6 +2,7 @@ import { registerThreadTools } from "../lib/production/threads.js";
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerProductionTools } from '../lib/production/index.js';
+import { fitFilterSchema } from '../lib/production/filter-schema.js';
 import { resolveTimeWindow } from '../lib/production/params.js';
 import { TRACE_FILTER_FIELDS } from '../lib/production/traces.js';
 import { VALIDATION_ERROR_CODE } from '../lib/shared/filter-fields.js';
@@ -65,6 +66,7 @@ describe('production tool surface', () => {
       'dashboard_llm_metrics_summary',
       'dashboard_top_models',
       'end_user_rank_by_usage',
+      'log_filter_schema',
       'log_get',
       'log_list',
       'error_timeseries',
@@ -147,6 +149,32 @@ describe('log_list', () => {
         model: { operator: 'icontains', value: ['gpt-4o'] },
         status: { operator: '', value: ['failed'] },
         thread_identifier: { operator: '', value: ['chat-1'] },
+      },
+    });
+  });
+
+  it('sends every condition on one field, and keeps a filter the model shortcut also sets', async () => {
+    const { client, call } = fakeClient();
+    const { log_list } = captureTools(client);
+    await log_list.handler({
+      model: 'gpt-4o',
+      filters: [
+        { field: 'cost', operator: 'gte', value: [0.05] },
+        { field: 'cost', operator: 'lt', value: [1] },
+        { field: 'model', operator: 'not', value: ['gpt-4o-mini'] },
+      ],
+    });
+    expect(call().body).toEqual({
+      operator: 'AND',
+      filters: {
+        cost: [
+          { operator: 'gte', value: [0.05] },
+          { operator: 'lt', value: [1] },
+        ],
+        model: [
+          { operator: 'not', value: ['gpt-4o-mini'] },
+          { operator: 'icontains', value: ['gpt-4o'] },
+        ],
       },
     });
   });
@@ -252,6 +280,39 @@ describe('trace_list', () => {
         error_count: { operator: 'gt', value: [0] },
       },
     });
+  });
+
+  it('keeps a filter on a field a shortcut also sets', async () => {
+    const { client, call } = fakeClient();
+    const { trace_list } = captureTools(client);
+    await trace_list.handler({
+      errors_only: true,
+      filters: [{ field: 'error_count', operator: 'lt', value: [5] }],
+    });
+    expect(call().body).toEqual({
+      filters: {
+        error_count: [
+          { operator: 'lt', value: [5] },
+          { operator: 'gt', value: [0] },
+        ],
+      },
+    });
+  });
+
+  it('rejects an OR connector before calling the backend, which refuses filter groups on traces', async () => {
+    const { client, fetchMock } = fakeClient();
+    const { trace_list } = captureTools(client);
+    const result = await trace_list.handler({
+      filters: [
+        { field: 'model', operator: 'icontains', value: ['claude'] },
+        { field: 'model', operator: 'icontains', value: ['gpt'], connector: 'OR' },
+      ],
+    });
+    expect(result.isError).toBe(true);
+    const error = parsed(result).error;
+    expect(error.code).toBe(VALIDATION_ERROR_CODE);
+    expect(error.unsupported_fields).toEqual(['model']);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('shortens input and output previews', async () => {
@@ -370,5 +431,118 @@ describe('metric tools', () => {
     const { query, body } = call();
     expect(query).toMatchObject({ breakdown_by: 'customer_identifier', sort_by: 'number_of_requests', limit: '10' });
     expect(body).toEqual({ filters: { model: { operator: 'icontains', value: 'claude' } } });
+  });
+});
+
+describe('log_filter_schema', () => {
+  it('reads the backend filter schema with a GET and passes the environment', async () => {
+    const schema = {
+      filters: [{ metric: 'latency', name: 'Generation', type: 'number', operators: ['lte', '', 'gte'],
+        percentiles: { p50: 1.2, p90: 4.4 }, measured_rows: 900, measured_over: "log_type = 'chat'" }],
+      operators: { gte: 'greater than or equal' },
+      measurements: { is_measured: true },
+    };
+    const { client, call } = fakeClient(schema);
+    const { log_filter_schema } = captureTools(client);
+
+    const result = parsed(await log_filter_schema.handler({ environment: 'prod' }));
+
+    expect(call()).toMatchObject({ path: '/api/request-logs/filter-schema/', method: 'GET', query: { environment: 'prod' } });
+    expect(call().body).toBeUndefined();
+    expect(result).toEqual(schema);
+  });
+
+  it('sends no environment when none is asked for', async () => {
+    const { client, call } = fakeClient({ filters: [], operators: {}, measurements: { is_measured: false } });
+    const { log_filter_schema } = captureTools(client);
+
+    await log_filter_schema.handler({});
+
+    expect(call().query).toEqual({});
+  });
+
+  it('says the backend lacks the endpoint when it answers 404', async () => {
+    const { client, fetchMock } = fakeClient();
+    fetchMock.mockImplementationOnce(async () => new Response(JSON.stringify({ detail: 'Not found.' }), { status: 404 }));
+    const { log_filter_schema } = captureTools(client);
+
+    const result = await log_filter_schema.handler({});
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('not available on this Respan backend');
+  });
+
+  it('drops whole metadata example values first, keeping closed vocabularies whole', async () => {
+    const value = 'tenant-value-0000000';
+    const status = { metric: 'status', operators: [''], example_values: ['success', 'failed'], value_count: 2, value_labels: { failed: 'Error' } };
+    const metadata = Array.from({ length: 100 }, (_, i) => ({
+      metric: `metadata__key_${i}`,
+      operators: ['', 'in'],
+      example_values: Array.from({ length: 30 }, (__, j) => `${value}${j}`),
+    }));
+    const { client } = fakeClient({ filters: [status, ...metadata], operators: {}, measurements: { is_measured: true } });
+    const { log_filter_schema } = captureTools(client);
+
+    const result = await log_filter_schema.handler({});
+    const body = parsed(result);
+
+    expect(result.content[0].text.length).toBeLessThanOrEqual(40_000);
+    expect(body.filters).toHaveLength(101);
+    expect(body.filters[0]).toEqual(status);
+    expect(body.filters[1].example_values).toEqual(Array.from({ length: 10 }, (_, j) => `${value}${j}`));
+  });
+
+  it('drops the labels of values it drops, then metadata keys as a last resort', () => {
+    const ids = Array.from({ length: 30 }, (_, j) => `prompt-${j}`);
+    const prompt = {
+      metric: 'prompt_id',
+      example_values: ids,
+      value_count: 30,
+      value_labels: Object.fromEntries(ids.map((id) => [id, 'x'.repeat(2_000)])),
+    };
+    const metadata = Array.from({ length: 100 }, (_, i) => ({ metric: `metadata__${'k'.repeat(400)}${i}` }));
+
+    const body = JSON.parse(fitFilterSchema({ filters: [prompt, ...metadata], metadata_filters_omitted: 5 }));
+
+    expect(body.filters).toEqual([{ ...prompt, example_values: ids.slice(0, 3), value_labels: Object.fromEntries(ids.slice(0, 3).map((id) => [id, 'x'.repeat(2_000)])) }]);
+    expect(body.metadata_filters_omitted).toBe(105);
+  });
+
+  it('still throws other backend errors', async () => {
+    const { client, fetchMock } = fakeClient();
+    fetchMock.mockImplementationOnce(async () => new Response('denied', { status: 403 }));
+    const { log_filter_schema } = captureTools(client);
+
+    await expect(log_filter_schema.handler({})).rejects.toThrow(/^403 /);
+  });
+});
+
+describe('log_summary filters', () => {
+  it('teaches the list and OR-group forms on top of the backend description', () => {
+    const description = (captureTools(null).log_summary.config.inputSchema as any).filters.description as string;
+    expect(description).toContain('Supported fields (closed set)');
+    expect(description).toContain('a range is two conditions on one field');
+    expect(description).toContain('"filter_params"');
+    expect(description).toContain('Never set "connector": "OR" at the top level');
+  });
+
+  it('adds a shortcut to a filter on the same field instead of replacing it', async () => {
+    const { client, call } = fakeClient({ number_of_requests: 1 });
+    const { log_summary } = captureTools(client);
+    await log_summary.handler({
+      model: 'gpt-4o',
+      filters: {
+        model: { operator: 'not', value: ['gpt-4o-mini'] },
+        cost: [{ operator: 'gte', value: [0.05] }, { operator: 'lt', value: [1] }],
+      },
+    });
+    expect(call().body.filters).toEqual({
+      model: [
+        { operator: 'not', value: ['gpt-4o-mini'] },
+        { operator: 'icontains', value: 'gpt-4o' },
+      ],
+      cost: [{ operator: 'gte', value: [0.05] }, { operator: 'lt', value: [1] }],
+      organization_key_id: { operator: 'not_empty', value: true },
+    });
   });
 });

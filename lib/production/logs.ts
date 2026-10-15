@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { AuthenticatedClient } from "../shared/client.js";
 import { rawFetch, requireClient } from "../shared/client.js";
-import { toBackendFilters } from "../shared/filter-fields.js";
+import { addFilterCondition, toBackendFilters, type BackendFilterBody } from "../shared/filter-fields.js";
 import {
   INTERNAL_RESPONSE_KEYS,
   READ_ONLY_WORKSPACE_TOOL,
@@ -20,7 +20,6 @@ import {
   resolvePage,
   resolveTimeWindow,
   timeWindowShape,
-  type BackendFilters,
 } from "./params.js";
 
 const LOG_PAGE_SIZE_DEFAULT = 5;
@@ -94,10 +93,10 @@ Defaults to the last 24 hours. The result has no total count: for totals over a 
         prompt_name: z.string().optional().describe("Only requests made with this saved prompt."),
         filters: z
           .array(filterConditionSchema(
-            "Log field, e.g. latency, cost, prompt_tokens, provider_id, span_name, error_message. Custom metadata uses 'metadata__<key>'.",
+            "Log field, e.g. latency, cost, prompt_tokens, provider_id, span_name, error_message, or 'metadata__<key>' for custom metadata. log_filter_schema lists the fields with their operators, this project's values and percentiles.",
           ))
           .optional()
-          .describe("Advanced: extra conditions on any log field, all of which must match. Example: [{\"field\": \"latency\", \"operator\": \"gt\", \"value\": [5]}]."),
+          .describe("Advanced: extra conditions on any log field, all of which must match. Example: [{\"field\": \"latency\", \"operator\": \"gt\", \"value\": [5]}]. Repeat a field for a range (cost gte 0.05, then cost lt 1); connector 'OR' on a repeat ORs it with that field's previous condition."),
         sort_by: z.enum(LOG_SORT_OPTIONS).optional().describe("Sort order (default -timestamp, newest first). '-' means descending."),
         ...pageShape(LOG_PAGE_SIZE_DEFAULT, LOG_PAGE_SIZE_MAX),
       },
@@ -108,16 +107,18 @@ Defaults to the last 24 hours. The result has no total count: for totals over a 
       const window = resolveTimeWindow(args);
       const { page, pageSize } = resolvePage(args, LOG_PAGE_SIZE_DEFAULT, LOG_PAGE_SIZE_MAX);
 
-      const filters: BackendFilters = { ...toBackendFilters(args.filters) };
-      if (args.model) filters.model = { operator: "icontains", value: [args.model] };
-      if (args.status) filters.status = { operator: "", value: [args.status] };
+      // Convenience params add an AND condition; they never replace a
+      // `filters` condition on the same field.
+      const filters: BackendFilterBody = { ...toBackendFilters(args.filters) };
+      if (args.model) addFilterCondition(filters, "model", { operator: "icontains", value: [args.model] });
+      if (args.status) addFilterCondition(filters, "status", { operator: "", value: [args.status] });
       if (args.customer_identifier) {
-        filters.customer_identifier = { operator: "", value: [args.customer_identifier] };
+        addFilterCondition(filters, "customer_identifier", { operator: "", value: [args.customer_identifier] });
       }
       if (args.thread_identifier) {
-        filters.thread_identifier = { operator: "", value: [args.thread_identifier] };
+        addFilterCondition(filters, "thread_identifier", { operator: "", value: [args.thread_identifier] });
       }
-      if (args.prompt_name) filters.prompt_name = { operator: "", value: [args.prompt_name] };
+      if (args.prompt_name) addFilterCondition(filters, "prompt_name", { operator: "", value: [args.prompt_name] });
 
       const result = await rawFetch(c, "/api/request-logs/list/", {
         query: {
