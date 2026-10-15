@@ -11,6 +11,7 @@ import { registerPulseTools } from '../pulses/index.js';
 import { registerPromptTools } from '../develop/prompts.js';
 import { registerOrganizationTools } from '../account/organizations.js';
 import { applyToolPolicy } from './tool-policy.js';
+import { SERVER_INSTRUCTIONS } from './instructions.js';
 import { resolveToolName, rewriteToolCallNames } from './tool-aliases.js';
 import { OAuthBroker, type ResolvedAccess } from '../oauth/broker.js';
 import { getOAuthConfig, type OAuthRealm } from '../oauth/config.js';
@@ -26,10 +27,10 @@ export function createServer(
   client: AuthenticatedClient | null,
   enabledTools?: Set<string>,
 ): McpServer {
-  const server = new McpServer({
-    name: 'respan',
-    version: '1.0.0',
-  });
+  const server = new McpServer(
+    { name: 'respan', version: '1.0.0' },
+    { instructions: SERVER_INSTRUCTIONS },
+  );
   applyToolPolicy(server);
   applyProductVocabulary(server);
   applyToolCatalog(server);

@@ -11,6 +11,7 @@ import { registerPulseTools } from "./pulses/index.js";
 import { registerPromptTools } from "./develop/prompts.js";
 import { registerOrganizationTools } from "./account/organizations.js";
 import { applyToolPolicy } from "./shared/tool-policy.js";
+import { SERVER_INSTRUCTIONS } from "./shared/instructions.js";
 import { rewriteToolCallNames } from "./shared/tool-aliases.js";
 
 async function main() {
@@ -22,10 +23,10 @@ async function main() {
     console.error("Only public tools will be available.");
   }
 
-  const server = new McpServer({
-    name: "respan",
-    version: "1.0.0",
-  });
+  const server = new McpServer(
+    { name: "respan", version: "1.0.0" },
+    { instructions: SERVER_INSTRUCTIONS },
+  );
   applyToolPolicy(server);
   applyProductVocabulary(server);
   applyToolCatalog(server);
