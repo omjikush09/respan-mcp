@@ -41,6 +41,29 @@ function customBehaviorPath(args: Record<string, any>): string {
   return `${CUSTOM_BEHAVIORS_PATH}${encodeURIComponent(String(args.behavior_id ?? ""))}/`;
 }
 
+/**
+ * The catalog's create text tells the caller to run custom_behavior_suggest and
+ * custom_behavior_analyze first. This server does not offer them: both run a
+ * Respan model, and the calling agent is a model that can draft and check a
+ * definition itself. So the rules the analysis judged are stated here instead
+ * (respan-backend pulses/utils/behaviors/suggestions.py, validity and polarity
+ * criteria), on create and on update, since either one sets the definition.
+ * Neither call runs a model when it is made; the scorer judges the saved
+ * definition on later spans.
+ */
+const CUSTOM_BEHAVIOR_DEFINITION_RULES = `A usable definition names one thing a reader could spot in a single conversation, e.g. "agent promises a refund" or "user asks for a human". Terse wording is fine. Not usable: a topic ("billing"), a metric ("slow responses"), an instruction to the agent ("always be polite"), or anything that needs more than one conversation to judge.
+
+polarity: positive = a success or a sign things went well; negative = a failure, a risk, frustration or harm; neutral = neither.`;
+
+const CUSTOM_BEHAVIOR_CREATE_DESCRIPTION = `Create a custom behavior: something the user or the agent does in a conversation, which Respan then flags on production spans. Draft the definition and a short name yourself, check behavior_list (the behaviors that are on, built-in and custom) and every page of custom_behavior_list at page_size 50 (disabled ones included) first so it does not duplicate one, and confirm the wording with the user before creating. Always pass polarity; left out, it is stored as neutral.
+
+${CUSTOM_BEHAVIOR_DEFINITION_RULES}`;
+
+// A missing catalog entry throws here at load, as registerBackendTool would.
+const CUSTOM_BEHAVIOR_UPDATE_DESCRIPTION = `${BACKEND_TOOLS.get("custom_behavior_update")!.description} Pass only the fields that change; the rest keep their stored values. Confirm a new wording with the user first.
+
+${CUSTOM_BEHAVIOR_DEFINITION_RULES}`;
+
 export function registerPulseTools(server: McpServer, client: AuthenticatedClient | null) {
   registerBehaviorSettings(server, client);
   // --- Behaviors ---
@@ -69,29 +92,22 @@ export function registerPulseTools(server: McpServer, client: AuthenticatedClien
     rawFetch(c, customBehaviorPath(args), { method: "GET" }),
   );
 
-  // Suggest and analyze save nothing, but each runs a billed LLM call.
-  registerBackendTool(server, client, "custom_behavior_suggest", ADDITIVE_WRITE_TOOL, (c, args) =>
-    rawFetch(c, `${CUSTOM_BEHAVIORS_PATH}suggestions/`, {
-      body: pickArgs(args, ["agent_description", "max_suggestions", "existing_behaviors"]),
-    }),
+  registerBackendTool(
+    server,
+    client,
+    "custom_behavior_create",
+    ADDITIVE_WRITE_TOOL,
+    (c, args) => rawFetch(c, CUSTOM_BEHAVIORS_PATH, { body: passedArgs(args, DEFINITION_KEYS) }),
+    { ...BACKEND_TOOLS.get("custom_behavior_create")!, description: CUSTOM_BEHAVIOR_CREATE_DESCRIPTION },
   );
 
-  registerBackendTool(server, client, "custom_behavior_analyze", ADDITIVE_WRITE_TOOL, (c, args) =>
-    args.descriptions?.length
-      ? rawFetch(c, `${CUSTOM_BEHAVIORS_PATH}analyze-definitions/`, {
-        body: { descriptions: args.descriptions },
-      })
-      : rawFetch(c, `${CUSTOM_BEHAVIORS_PATH}analyze-definition/`, {
-        body: { description: args.description },
-      }),
-  );
-
-  registerBackendTool(server, client, "custom_behavior_create", ADDITIVE_WRITE_TOOL, (c, args) =>
-    rawFetch(c, CUSTOM_BEHAVIORS_PATH, { body: passedArgs(args, DEFINITION_KEYS) }),
-  );
-
-  registerBackendTool(server, client, "custom_behavior_update", DESTRUCTIVE_TOOL, (c, args) =>
-    rawFetch(c, customBehaviorPath(args), { method: "PATCH", body: passedArgs(args, DEFINITION_KEYS) }),
+  registerBackendTool(
+    server,
+    client,
+    "custom_behavior_update",
+    DESTRUCTIVE_TOOL,
+    (c, args) => rawFetch(c, customBehaviorPath(args), { method: "PATCH", body: passedArgs(args, DEFINITION_KEYS) }),
+    { ...BACKEND_TOOLS.get("custom_behavior_update")!, description: CUSTOM_BEHAVIOR_UPDATE_DESCRIPTION },
   );
 
   registerBackendTool(server, client, "custom_behavior_delete", DESTRUCTIVE_TOOL, (c, args) =>

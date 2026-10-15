@@ -30,10 +30,37 @@ describe('feature-oriented MCP contracts', () => {
     try {
       const { tools } = await client.listTools();
       const names = tools.map(t => t.name);
-      expect(tools).toHaveLength(54);
+      expect(tools).toHaveLength(52);
       expect(new Set(tools.map(t => t._meta?.['respan/category'])).size).toBe(8);
       for (const name of ['trace_summary', 'log_summary', 'behavior_summary', 'behavior_records', 'behavior_settings_get', 'behavior_settings_update', 'error_group_list', 'error_group_get', 'error_timeseries', 'incident_list', 'metrics_summary', 'metrics_timeseries', 'metrics_grouped', 'user_usage_list', 'monitor_alert_list', 'monitor_alert_timeseries', 'notification_destination_list', 'notification_destination_get', 'prompt_version_list', 'prompt_draft_update', 'workspace_current', 'workspace_list', 'workspace_switch']) expect(names).toContain(name);
       for (const name of ['thread_list', 'thread_get', 'pulse_behaviors_summary', 'org_list']) expect(names).not.toContain(name);
+    } finally { await client.close(); }
+  });
+
+  it('offers no behavior tool that runs a Respan model, under any name', async () => {
+    const { client, fetch } = await fixture();
+    try {
+      const { tools } = await client.listTools();
+      expect(tools.filter(t => t._meta?.['respan/category'] === 'behaviors')).toHaveLength(12);
+      for (const name of ['custom_behavior_suggest', 'custom_behavior_analyze']) {
+        expect(tools.map(t => t.name)).not.toContain(name);
+        // An old client calling a dropped name gets a clean unknown-tool error, not a backend call.
+        const result = await client.callTool({ name, arguments: {} }).catch((error: Error) => ({ isError: true, content: [{ type: 'text', text: error.message }] }));
+        expect(result.isError).toBe(true);
+        expect(JSON.stringify(result.content)).toMatch(new RegExp(`${name}.*not found`, 'i'));
+      }
+      expect(fetch).not.toHaveBeenCalled();
+    } finally { await client.close(); }
+  });
+
+  it('ignores a dropped behavior name in the enabled-tools list', async () => {
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await createServer(null, new Set(['custom_behavior_suggest', 'custom_behavior_analyze', 'custom_behavior_create'])).connect(b);
+    const client = new Client({ name: 'enabled-test', version: '1' });
+    await client.connect(a);
+    try {
+      const { tools } = await client.listTools();
+      expect(tools.map(t => t.name)).toEqual(['custom_behavior_create']);
     } finally { await client.close(); }
   });
 
