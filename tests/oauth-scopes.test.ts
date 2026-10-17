@@ -414,7 +414,7 @@ describe('the read-only gate covers the whole tool surface', () => {
   });
 
   it('records the product names it hid, not the registration names', () => {
-    const hidden = hiddenWriteToolsOf(createServer(null, undefined, true));
+    const hidden = hiddenWriteToolsOf(createServer(null, undefined, undefined, true));
     expect(hidden.has('workspace_switch')).toBe(true);
     expect(hidden.has('org_switch')).toBe(false);
   });

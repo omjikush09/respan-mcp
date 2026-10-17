@@ -22,6 +22,7 @@
     "api/mcp/enterprise.ts",
     "api/mcp/readonly.ts",
     "api/mcp/enterprise-readonly.ts",
+    "api/mcp/docs.ts",
     "api/well-known/**/*"
   ],
   "exclude": ["node_modules", "dist", "src", "scripts", "tests"]

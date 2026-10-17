@@ -16,6 +16,13 @@ import {
   removeWriteTools,
 } from './tool-policy.js';
 import { resolveToolName, rewriteToolCallNames } from './tool-aliases.js';
+import {
+  instrumentToolCalls,
+  noteAliasedCalls,
+  recordRequest,
+  telemetryContext,
+  type TelemetryContext,
+} from './telemetry.js';
 import { OAuthBroker, type ResolvedAccess } from '../oauth/broker.js';
 import { getOAuthConfig, type OAuthRealm } from '../oauth/config.js';
 import { InvalidAccessTokenError } from '../oauth/errors.js';
@@ -30,6 +37,7 @@ import {
 export function createServer(
   client: AuthenticatedClient | null,
   enabledTools?: Set<string>,
+  telemetry?: TelemetryContext,
   isReadOnly = false,
 ): McpServer {
   const server = new McpServer({
@@ -53,6 +61,8 @@ export function createServer(
       return originalRegisterTool.apply(server, arguments as any);
     };
   }
+  // Last, so it sees only the tools the filter above lets through.
+  if (telemetry) instrumentToolCalls(server, telemetry);
 
   registerProductionTools(server, client);
   registerPulseTools(server, client);
@@ -312,11 +322,10 @@ export function createMcpHandler(
       // read-only URL narrows them here.
       const isReadOnly = Boolean(options.readOnlyEndpointPath)
         || (oauthAccess ? isReadOnlySession(oauthAccess.session.scope) : false);
-      const server = createServer(authenticatedClient, enabledTools, isReadOnly);
+      const telemetry = telemetryContext(realm, bearer, req.headers);
+      const server = createServer(authenticatedClient, enabledTools, telemetry, isReadOnly);
+      noteAliasedCalls(telemetry, req.body);
       const renamedTools = rewriteToolCallNames(req.body);
-      if (renamedTools.length > 0) {
-        console.warn(`MCP tools/call used old tool name(s): ${renamedTools.join(', ')}`);
-      }
       const blockedCalls = hiddenWriteToolCalls(server, req.body);
       if (blockedCalls) {
         const responses = blockedCalls.map(({ id, name }) => ({
@@ -335,6 +344,9 @@ export function createMcpHandler(
         { parsedBody: req.body },
       );
       const bufferedResponse = await bufferWebResponse(transportResponse);
+      // A revoked OAuth session turns the answer into the 401 challenge below.
+      const isAccepted = bufferedResponse.status < 400 && !(backendUnauthorized && oauthAccess);
+      recordRequest(server, telemetry, req.body, renamedTools, isAccepted);
 
       if (backendUnauthorized && oauthAccess) {
         await getSessionStore().deleteAccessSession(
