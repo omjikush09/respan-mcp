@@ -99,13 +99,28 @@ public broker boundary.
 | Upstash usage controls | Use a Free plan for Preview. For Production, use the approved plan with a $10 monthly budget cap and usage alerts when supported. Confirm current pricing before approval. |
 | Deployment retention | Retain the last known-good Production deployment for immediate rollback. |
 
+### OAuth scopes
+
+An OAuth connection is read-only unless the user allows changes at consent.
+
+- `mcp:read` is always granted. It reaches the tools annotated `readOnlyHint: true`.
+- `mcp:write` reaches every other tool: a tool whose `readOnlyHint` is false or missing counts as a write, so a new tool stays hidden from read-only sessions until it is marked read-only. `workspace_switch` is a write, because it changes the active organization for the whole account.
+- `mcp:write` is granted only when the client asked for it, which a missing `scope` parameter counts as, and the user ticked "Also allow changes" on the login page.
+- The granted scope is stored on the code and on the access and refresh sessions. It is returned as `scope` from `/token`, and a refresh carries it forward unchanged.
+- A read-only session does not list write tools. Calling one returns a tool error `insufficient_scope`, with `_meta["mcp/www_authenticate"]` so ChatGPT can offer a new consent.
+- API keys are not filtered here: the backend enforces each key's own permissions, and `["*:read"]` keys are read-only.
+- Sessions issued before scopes existed have no stored scope and keep full access until they expire (at most 30 days). Set `MCP_LEGACY_SCOPE=read` to make them read-only at once; any non-empty value does the same, so a typo fails closed.
+- A client that sends only scope values this server does not define (claude.ai sends `claudeai`) is treated like one that sent none, so the user can still allow changes.
+- `/mcp/readonly` and `/mcp/enterprise/readonly` serve only read-only tools for every credential. Each has its own protected-resource metadata, advertising `mcp:read` only. Authorizing against one requests `mcp:read` only and binds the token to the realm's `/mcp` resource, so the token is read-only on both URLs. A 401 from either read-only URL challenges with `scope="mcp:read"`. A code exchange or refresh that names the read-only resource is refused (`invalid_grant`) when the grant can write. A client that sends neither `resource` nor `scope` is indistinguishable from a `/mcp` sign-in and gets the normal consent.
+
+**Treat this change as roll-forward only.** A deploy from before scopes existed ignores the stored `scope`, so rolling back gives read-only sessions full access again.
+
 ### Not required for this release
 
 - Vercel Blob, Edge Config, Postgres, or the separate official Redis product.
 - A new Vercel Cron Job.
 - Rolling Releases.
 - A deployment hook.
-- A new scope or permission service.
 - A new OAuth client-registration service.
 - A Vercel Firewall exception, unless an existing team policy blocks the MCP
   endpoints.
@@ -120,7 +135,7 @@ cd /workspaces/respan-mcp
 git worktree list --porcelain
 git branch --show-current
 git status --short
-npm test
+npm run check
 npm run build
 git diff --check
 ```
@@ -235,6 +250,7 @@ will not be retained for future release verification.
 | `MCP_ACCESS_TOKEN_TTL_SECONDS` | Yes for rollout | `60` | `14400` | Preview uses 60 seconds to prove expiry. Production uses four hours. |
 | `RESPAN_API_BASE_URL` | Recommended | `https://api.respan.ai/api` | `https://api.respan.ai/api` | Platform realm backend. |
 | `RESPAN_ENTERPRISE_API_BASE_URL` | Recommended | `https://endpoint.respan.ai/api` | `https://endpoint.respan.ai/api` | Enterprise realm backend. |
+| `MCP_LEGACY_SCOPE` | No | unset | unset | Governs sessions issued before OAuth scopes existed. Unset keeps their full access until they expire, at most 30 days. `read` (or any non-empty value) makes them read-only at once. See "OAuth scopes" above. |
 
 The following broker variables have validated defaults and normally do not need
 Vercel overrides:
@@ -546,7 +562,7 @@ If a secret is exposed:
 
 ### Verification
 
-- [ ] `npm test` passes.
+- [ ] `npm run check` passes.
 - [ ] `npm run build` passes.
 - [ ] `git diff --check` passes.
 - [ ] Preview metadata uses the Preview origin.
