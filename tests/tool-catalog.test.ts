@@ -30,7 +30,13 @@ describe('shared tool discovery', () => {
       trace_get: 'traces', log_get: 'logs', behavior_grouped: 'behaviors',
       custom_behavior_create: 'behaviors', error_group_get: 'errors',
       monitor_create: 'monitors', monitor_update: 'monitors', notification_destination_list: 'monitors',
+      guardrail_summary: 'guardrails', guardrail_timeseries: 'guardrails',
+      guardrail_grouped: 'guardrails', guardrail_list: 'guardrails',
     })) expect(byName.get(name)?._meta?.[TOOL_CATEGORY_META_KEY]).toBe(category);
+    for (const tool of tools.filter(t => t._meta?.[TOOL_CATEGORY_META_KEY] === 'guardrails')) {
+      expect(tool.title, tool.name).toBeTruthy();
+      expect(tool.annotations?.readOnlyHint, tool.name).toBe(true);
+    }
   });
   it('excludes retired resource families from the public product surface', async () => {
     const names = (await list(createServer(null))).map(t => t.name);

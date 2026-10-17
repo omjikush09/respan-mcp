@@ -8,23 +8,25 @@ import {
   INTERNAL_RESPONSE_KEYS,
   READ_ONLY_WORKSPACE_TOOL,
   budgetedJson,
+  budgetedPage,
   omitKeys,
   readListPage,
   textResult,
-  truncateStrings,
+  type PageBudget,
 } from "../shared/tool-result.js";
 import {
   environmentShape,
   filterConditionSchema,
   pageShape,
+  pageSizeNote,
   resolvePage,
   resolveTimeWindow,
   timeWindowShape,
   type BackendFilters,
 } from "./params.js";
 
-const LOG_PAGE_SIZE_DEFAULT = 5;
-const LOG_PAGE_SIZE_MAX = 10;
+const LOG_PAGE_SIZE_DEFAULT = 25;
+const LOG_PAGE_SIZE_MAX = 100;
 
 /** Columns log_list returns per row. Message text is left to log_get. */
 export const LOG_LIST_FIELDS = [
@@ -45,6 +47,20 @@ export const LOG_LIST_FIELDS = [
   "error_message",
 ] as const;
 
+/**
+ * Extra columns a caller can ask log_list for through `fields`: the ones the
+ * list endpoint returns to both API keys and OAuth (JWT) sessions.
+ */
+export const LOG_OPTIONAL_FIELDS = [
+  "environment",
+  "provider_id",
+  "log_type",
+  "metadata",
+  "prompt_id",
+  "total_request_tokens",
+  "tokens_per_second",
+] as const;
+
 export const LOG_SORT_OPTIONS = [
   "-timestamp",
   "timestamp",
@@ -56,22 +72,33 @@ export const LOG_SORT_OPTIONS = [
 
 export const LOG_STATUSES = ["success", "failed"] as const;
 
-/** Longest string a log_list row keeps (error_message is the long one). */
-const LOG_PREVIEW_CHARS = 300;
-const LOG_LIST_BUDGET = { maxChars: 20_000, stringCaps: [120] };
+/**
+ * Strings are cut to 300 chars (error_message is the long one), then shrink
+ * before rows are reduced to ids. Ids and filterable names stay whole so
+ * log_get, trace_get and the filters can take them back. 40k chars of id- and
+ * digit-heavy JSON is roughly 13-16k tokens.
+ */
+const LOG_LIST_BUDGET: PageBudget = {
+  maxChars: 40_000,
+  previewChars: 300,
+  stringCaps: [120, 60],
+  keepWhole: ["unique_id", "trace_unique_id", "thread_identifier", "customer_identifier", "prompt_name", "model", "span_name"],
+  smallerRowsHint: "Asking without `fields` (metadata is the large one) or with a smaller page_size fits more full rows.",
+};
+const LOG_LIST_DETAIL_HINT = "Call log_get with a row's unique_id for the full request.";
 const LOG_DETAIL_BUDGET = { maxChars: 40_000, stringCaps: [4_000, 1_500, 500] };
 
-function projectLogRow(row: unknown): Record<string, unknown> {
+function projectLogRow(row: unknown, fields: readonly string[]): Record<string, unknown> {
   const source = (row && typeof row === "object" ? row : {}) as Record<string, unknown>;
   const projected: Record<string, unknown> = {};
-  for (const field of LOG_LIST_FIELDS) {
+  for (const field of fields) {
     if (field in source) projected[field] = source[field];
   }
   // The list endpoint names the log id `id`; log_get takes it as unique_id.
   if (projected.unique_id === undefined && source.id !== undefined) {
     projected.unique_id = source.id;
   }
-  return truncateStrings(projected, LOG_PREVIEW_CHARS) as Record<string, unknown>;
+  return projected;
 }
 
 export function registerLogTools(server: McpServer, client: AuthenticatedClient | null) {
@@ -81,9 +108,9 @@ export function registerLogTools(server: McpServer, client: AuthenticatedClient 
       title: "Find requests",
       description: `Find individual LLM requests and spans in production, newest first. Use it to answer "show me the failed requests today", "slowest gpt-4o calls this week" or "what did user X send".
 
-Returns one page of compact rows: ${LOG_LIST_FIELDS.join(", ")}. Message text is not included: call log_get with a row's unique_id to read the full input and output.
+Returns one page of compact rows (default ${LOG_PAGE_SIZE_DEFAULT}, up to ${LOG_PAGE_SIZE_MAX}): ${LOG_LIST_FIELDS.join(", ")}. Add columns with \`fields\`. Message text is not included: call log_get with a row's unique_id to read the full input and output.
 
-Defaults to the last 24 hours. The result has no total count: for totals over a period (request count, cost, error rate) use dashboard_llm_metrics_summary instead of paging through rows.`,
+Each page says how many rows it returned, whether anything was shortened or dropped (\`truncated\`), and \`next_page\` when there are more. When paging, send back the start_time and end_time the page reports. Defaults to the last 24 hours. The result has no total count: for totals over a period (request count, cost, error rate) use dashboard_llm_metrics_summary instead of paging through rows.`,
       inputSchema: {
         ...timeWindowShape,
         ...environmentShape,
@@ -99,6 +126,10 @@ Defaults to the last 24 hours. The result has no total count: for totals over a 
           .optional()
           .describe("Advanced: extra conditions on any log field, all of which must match. Example: [{\"field\": \"latency\", \"operator\": \"gt\", \"value\": [5]}]."),
         sort_by: z.enum(LOG_SORT_OPTIONS).optional().describe("Sort order (default -timestamp, newest first). '-' means descending."),
+        fields: z
+          .array(z.enum(LOG_OPTIONAL_FIELDS))
+          .optional()
+          .describe("Extra columns to include per row. Message text is not available here; log_get has it."),
         ...pageShape(LOG_PAGE_SIZE_DEFAULT, LOG_PAGE_SIZE_MAX),
       },
       annotations: READ_ONLY_WORKSPACE_TOOL,
@@ -107,6 +138,7 @@ Defaults to the last 24 hours. The result has no total count: for totals over a 
       const c = requireClient(client);
       const window = resolveTimeWindow(args);
       const { page, pageSize } = resolvePage(args, LOG_PAGE_SIZE_DEFAULT, LOG_PAGE_SIZE_MAX);
+      const fields = [...LOG_LIST_FIELDS, ...(args.fields ?? [])];
 
       const filters: BackendFilters = { ...toBackendFilters(args.filters) };
       if (args.model) filters.model = { operator: "icontains", value: [args.model] };
@@ -126,20 +158,25 @@ Defaults to the last 24 hours. The result has no total count: for totals over a 
           sort_by: args.sort_by ?? "-timestamp",
           page,
           page_size: pageSize,
-          include_fields: [...LOG_LIST_FIELDS, "id"].join(","),
+          include_fields: [...fields, "id"].join(","),
           fetch_filters: "false",
         },
         body: Object.keys(filters).length > 0 ? { operator: "AND", filters } : {},
       });
 
       const { rows, hasMore } = readListPage(result, pageSize);
-      return textResult(budgetedJson({
-        ...window,
-        page,
-        page_size: pageSize,
-        has_more: hasMore,
-        results: rows.map(projectLogRow),
-      }, LOG_LIST_BUDGET));
+      return textResult(budgetedPage(
+        {
+          ...window,
+          page,
+          page_size: pageSize,
+          ...pageSizeNote(args.page_size, LOG_PAGE_SIZE_MAX),
+          has_more: hasMore,
+        },
+        rows.map((row) => projectLogRow(row, fields)),
+        LOG_LIST_BUDGET,
+        LOG_LIST_DETAIL_HINT,
+      ));
     },
   );
 

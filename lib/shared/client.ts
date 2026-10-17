@@ -28,6 +28,11 @@ export function createClient(auth: AuthConfig, baseUrl?: string): AuthenticatedC
   };
 }
 
+/** True when rawFetch failed with a 401: the backend did not accept the caller's credentials. */
+export function isUnauthorized(error: unknown): boolean {
+  return error instanceof Error && /^401\b/.test(error.message);
+}
+
 /**
  * Raw fetch helper for endpoints not yet in the SDK.
  * Throws on non-2xx with the response body included.
@@ -58,7 +63,10 @@ export async function rawFetch(
   let parsed: unknown;
   try { parsed = text ? JSON.parse(text) : null; } catch { parsed = text; }
   if (!res.ok) {
-    throw new Error(`${res.status} ${res.statusText}: ${typeof parsed === 'string' ? parsed : JSON.stringify(parsed)}`);
+    throw Object.assign(
+      new Error(`${res.status} ${res.statusText}: ${typeof parsed === 'string' ? parsed : JSON.stringify(parsed)}`),
+      { status: res.status },
+    );
   }
   return parsed;
 }

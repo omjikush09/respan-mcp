@@ -8,7 +8,7 @@
 // tests/instructions.test.ts checks the length and that every tool named here
 // is registered.
 
-export const SERVER_INSTRUCTIONS = `Respan is an LLM observability platform. These tools read and manage the user's own Respan workspace in eight areas: traces (agent runs), logs (single LLM requests and spans), metrics, behaviors (flagged patterns), errors and incidents, monitors (alerts), prompts, and workspace (which organization is active).
+export const SERVER_INSTRUCTIONS = `Respan is an LLM observability platform. These tools read and manage the user's own Respan workspace in nine areas: traces (agent runs), logs (single LLM requests and spans), metrics, behaviors (flagged patterns), errors and incidents, guardrails (blocked requests), monitors (alerts), prompts, and workspace (which organization is active).
 
 For questions about production traffic, go from totals to rows to detail:
 1. Totals first. Lists have no total, so never count rows to answer "how many". metrics_summary gives requests, cost, tokens, latency and error rate; log_summary and trace_summary count requests or traces matching filters; behavior_summary and error_group_list rank what fired.

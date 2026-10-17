@@ -51,6 +51,10 @@ No installation required.
 
 3. Restart Cursor/Claude Desktop
 
+**Read-only by default.** When you connect with OAuth (sign in through the browser instead of pasting a key), the client only gets tools that read your data. To let it create, update, deploy or delete, tick **Also allow changes** on the consent page. Calls to change tools from a read-only connection return an `insufficient_scope` error that explains how to reconnect. With an API key, the key's own permissions apply; create a key with read-only permissions for the same effect. OAuth connections made before this change keep their access until they expire.
+
+**A URL that can never write.** `https://mcp.respan.ai/mcp/readonly` (and `/mcp/enterprise/readonly`) serves only read-only tools for every credential, OAuth or API key. A sign-in started from it grants read access only, and the consent page offers no "allow changes" option (this relies on the client sending the URL as its OAuth `resource`, or the `mcp:read` scope it advertises, as MCP clients do). Even a token that can write lists only read-only tools here. Use it when a connector must stay read-only whatever the user picks.
+
 ---
 
 ### Option 2: Local Stdio
@@ -105,8 +109,9 @@ Share this config with your team:
 
 ## Product tools
 
-The platform server exposes eight feature categories: traces, logs, behaviors,
-errors, metrics, monitors, prompts, and workspace. Public docs search is separate.
+The platform server exposes nine feature categories: traces, logs, behaviors,
+errors, guardrails, metrics, monitors, prompts, and workspace. Public docs search
+is separate.
 Custom behavior definitions belong to Behaviors; notification destinations belong
 to Monitors. Application conversations are inspected through request/trace tools
 rather than a separate conversation product.
@@ -139,9 +144,20 @@ including stored webhook secrets, when a committed family needs a new draft.
 Secrets are omitted from results. Alert history counts delivered notifications,
 not every execution; an empty history is not evidence of inactivity.
 
+Guardrails are read-only: totals, outcomes over time and blocked requests by
+dimension accept an API key; `guardrail_list` (the catalog, which guardrails are
+on, and PII redaction settings) requires OAuth. Nothing turns a guardrail on or
+off.
+
 Workspace identity/selection and behavior detection settings require OAuth.
 Behavior settings writes resolve their target from the current session and replace
 only the disabled list. API keys remain project-bound.
+
+`log_list` and `trace_list` pages say what they cut: `returned`, and a
+`truncated` note when text was shortened or, as a last resort, the last rows
+were reduced to their IDs. IDs and names you can filter on are never
+shortened, so a row can always be read in full with `log_get` or `trace_get`.
+When paging, pass back the `start_time` and `end_time` the page reports.
 
 The public surface does not register automation, evaluator, grader, dataset,
 experiment, generic workflow or export-workflow tools. Their backend capabilities
@@ -189,7 +205,8 @@ respan-mcp/
 │   │   ├── threads.ts        # legacy module, not publicly registered
 │   │   └── metrics.ts        # metric summaries, grouped rankings, user usage
 │   ├── pulses/
-│   │   └── index.ts          # behaviors, error issues, incidents
+│   │   ├── index.ts          # behaviors, error issues, incidents
+│   │   └── guardrails.ts     # guardrail_summary, guardrail_timeseries, guardrail_grouped, guardrail_list
 │   ├── account/
 │   │   └── organizations.ts  # workspace identity and selection
 │   └── develop/
@@ -216,6 +233,20 @@ cd ../respan-backend
 ```
 
 If a tool this server registers was renamed or removed in the backend, startup fails loudly rather than dropping it.
+
+### Telemetry
+
+The hosted endpoints (`/mcp`, `/mcp/enterprise`, `/mcp/docs`) write one JSON line to stdout for each of these events. On Vercel the lines land in the runtime logs (`lib/shared/telemetry.ts`).
+
+| `event` | When | Main fields |
+|---|---|---|
+| `mcp.tool_call` | Every well-formed `tools/call`, including calls whose arguments fail the tool's input schema and calls to a tool this server does not have (a request the SDK rejects as malformed JSON-RPC, such as non-object `arguments`, is not a tool call and is not logged) | `tool` (the current product name, also when the client called an old name), `category` (the tool's `respan/category`; absent for a tool this server does not have), `alias_used` and, when it is true, `alias` (the old name the client sent), `status` (`ok`, `tool_error`, `exception`, `invalid_arguments`, `unknown_tool`), `latency_ms`, `result_chars`, `arg_keys` (the names the client sent), `http_status`, `error_class` |
+| `mcp.session_init` | An `initialize` the server completed | `client_name`, `client_version`, `requested_protocol_version` |
+| `mcp.tool_alias` | A request whose `tools/call` used an old tool name, written even when the transport rejects the request and no `mcp.tool_call` follows (old names in the `Respan-Enabled-Tools` header are not counted) | `old_names` |
+
+Every line also carries `realm`, `auth_kind` (`oauth`, `jwt`, `api_key`, `env`, `none`), `user_agent`, `protocol_version` and, when there is a bearer, `session_key`. The `session_key` is the first 12 hex characters of a SHA-256 of the bearer under a fixed telemetry prefix, so the stateless calls made with one credential can be grouped together but the key cannot be matched against the token hashes the OAuth session store keeps. It changes when an OAuth or JWT token is refreshed, and `/mcp/docs`, which takes no credential, logs none. One request writes at most 50 `mcp.tool_call` lines, and name lists are capped at 32 entries.
+
+Argument values, tool results and credentials are never logged. stdio is not instrumented, because there stdout carries the protocol and the process runs on the user's machine.
 
 ---
 
@@ -248,7 +279,25 @@ For custom API endpoints, set the `RESPAN_API_BASE_URL` environment variable:
 ```bash
 npm run build        # Compile TypeScript
 npm run stdio        # Build and run in stdio mode
+npm run check        # Type-check the source, tests and scripts, then run the tests
 ```
+
+CI (`.github/workflows/ci.yml`) runs `npm ci`, `npm run check` and
+`npm run build` on every pull request. Vercel deploys main to Production on
+merge without running tests, so a red check means the change is not ready to
+merge.
+
+`tests/tool-surface.test.ts` checks every tool clients see:
+- the tool name;
+- the description length (Claude Code truncates past 2,048 characters);
+- that the input schema compiles;
+- the tool names, the total `tools/list` size (up to 10% growth is allowed)
+  and which tools lack a title (a new tool must have one), against
+  `tests/fixtures/tool-surface.baseline.json`.
+
+If you add, remove or rename tools, or grow the list past the allowance, the
+check fails: run `npm run surface:update` and commit the new baseline with the
+change, so the name and size diff show up in review.
 
 ### Local OAuth broker
 
@@ -348,7 +397,7 @@ procedure, see [Public MCP OAuth Broker: Vercel Deployment Runbook](docs/vercel-
 Automated checks:
 
 ```bash
-npm test
+npm run check
 TEST_REDIS_URL=redis://127.0.0.1:6379/15 npm test -- --run tests/redis-store.integration.test.ts
 npm run build
 git diff --check
