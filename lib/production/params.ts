@@ -38,6 +38,11 @@ export function pageShape(defaultSize: number, maxSize: number) {
   };
 }
 
+/** Tells the caller when its page_size was capped, instead of capping silently. */
+export function pageSizeNote(requested: number | undefined, maxSize: number) {
+  return requested !== undefined && requested > maxSize ? { page_size_capped_from: requested } : {};
+}
+
 export function resolvePage(
   args: { page?: number; page_size?: number },
   defaultSize: number,
@@ -57,12 +62,15 @@ function parseTime(value: string, name: string): Date {
   return parsed;
 }
 
-/** Fills in the default 24-hour window and normalizes both ends to ISO 8601. */
-export function resolveTimeWindow(args: { start_time?: string; end_time?: string }) {
+/** Fills in the default window (24 hours unless given) and normalizes both ends to ISO 8601. */
+export function resolveTimeWindow(
+  args: { start_time?: string; end_time?: string },
+  defaultWindowMs: number = DEFAULT_WINDOW_MS,
+) {
   const end = args.end_time ? parseTime(args.end_time, "end_time") : new Date();
   const start = args.start_time
     ? parseTime(args.start_time, "start_time")
-    : new Date(end.getTime() - DEFAULT_WINDOW_MS);
+    : new Date(end.getTime() - defaultWindowMs);
   if (start >= end) throw new Error("start_time must be before end_time.");
   return { start_time: start.toISOString(), end_time: end.toISOString() };
 }

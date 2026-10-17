@@ -172,8 +172,67 @@ async function createRedisInspector(): Promise<RedisInspector> {
     delete: async (keys) => {
       if (keys.length > 0) await client.del(keys);
     },
-    close: () => client.quit(),
+    close: async () => {
+      await client.quit();
+    },
   };
+}
+
+/** A full authorize -> login -> token round trip, for a second consent choice. */
+async function authorizeWithConsent(input: {
+  metadata: JsonObject;
+  clientId: string;
+  allowWrites: boolean;
+  resource?: string;
+}): Promise<JsonObject> {
+  const requestedResource = input.resource ?? resource;
+  const verifier = randomBytes(64).toString('base64url');
+  const authorize = new URL(input.metadata.authorization_endpoint);
+  authorize.search = new URLSearchParams({
+    response_type: 'code',
+    client_id: input.clientId,
+    redirect_uri: callbackUrl,
+    state: randomBytes(24).toString('base64url'),
+    code_challenge: createHash('sha256').update(verifier).digest('base64url'),
+    code_challenge_method: 'S256',
+    resource: requestedResource,
+  }).toString();
+  const redirected = await fetch(authorize, { redirect: 'manual' });
+  const login = new URL(required(redirected.headers.get('location') || undefined, 'Login redirect'), baseUrl);
+  const cookie = required(redirected.headers.get('set-cookie')?.split(';')[0], 'CSRF cookie');
+  const approved = await json(await fetch(`${baseUrl}/auth`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({
+      action: 'login',
+      email,
+      password,
+      oauth_transaction: login.searchParams.get('transaction_id'),
+      oauth_csrf: login.searchParams.get('csrf'),
+      approve: true,
+      allow_writes: input.allowWrites,
+      enterprise: isEnterprise,
+    }),
+  }));
+  assert(
+    typeof approved.redirect_url === 'string',
+    `Consent login failed: ${JSON.stringify(approved.error ?? approved)}`,
+  );
+  const code = required(new URL(approved.redirect_url).searchParams.get('code') || undefined, 'authorization code');
+  const exchanged = await fetch(input.metadata.token_endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      code_verifier: verifier,
+      client_id: input.clientId,
+      redirect_uri: callbackUrl,
+      resource: requestedResource,
+    }),
+  });
+  assert(exchanged.ok, 'Second authorization code exchange failed');
+  return json(exchanged);
 }
 
 async function run(): Promise<void> {
@@ -296,6 +355,7 @@ async function run(): Promise<void> {
       ));
       assert(context.client_name === 'Local OAuth verification probe', 'Client name mismatch');
       assert(context.redirect_uri === callbackUrl, 'Redirect URI mismatch');
+      assert(context.is_write_requested === true, 'A client asking for every scope was not offered write access');
     });
 
     const callback = await step('approved email and password login', async () => {
@@ -346,6 +406,7 @@ async function run(): Promise<void> {
       assert(responseBody.refresh_token.startsWith('mcp_rt_'), 'Invalid MCP refresh token');
       assert(responseBody.token_type === 'Bearer', 'Invalid token type');
       assert(responseBody.expires_in === 60, 'Local access TTL is not 60 seconds');
+      assert(responseBody.scope === 'mcp:read', 'Consent without "allow changes" did not issue a read-only scope');
       assert(!JSON.stringify(responseBody).includes('eyJ'), 'Token response contains a backend JWT');
       return responseBody;
     });
@@ -392,6 +453,55 @@ async function run(): Promise<void> {
       assert(result.response.ok && result.body.result && !result.body.result.isError, 'OAuth tool call failed');
     });
 
+    await step('read-only session hides and refuses write tools', async () => {
+      const tools = await mcpRequest(pair.access_token, 'tools/list', {}, 31);
+      const names = (tools.body.result?.tools ?? []).map((tool: JsonObject) => tool.name);
+      assert(names.includes('log_list'), 'Read-only session lost a read tool');
+      assert(!names.includes('prompt_deploy'), 'Read-only session lists prompt_deploy');
+      const refused = await mcpRequest(pair.access_token, 'tools/call', {
+        name: 'prompt_deploy',
+        arguments: { prompt_id: 'verify-oauth-local-probe' },
+      }, 32);
+      assert(refused.body.result?.isError === true, 'Write tool call was not refused');
+      assert(
+        JSON.stringify(refused.body.result).includes('insufficient_scope'),
+        'Write tool refusal is not insufficient_scope',
+      );
+    });
+
+    await step('consent with "allow changes" issues mcp:write', async () => {
+      const writePair = await authorizeWithConsent({
+        metadata,
+        clientId: registration.client_id,
+        allowWrites: true,
+      });
+      assert(writePair.scope === 'mcp:read mcp:write', 'Approved write access was not issued');
+      const tools = await mcpRequest(writePair.access_token, 'tools/list', {}, 33);
+      const names = (tools.body.result?.tools ?? []).map((tool: JsonObject) => tool.name);
+      assert(names.includes('prompt_deploy'), 'Write-approved session does not list prompt_deploy');
+    });
+
+    await step('read-only URL grants read scope even when changes are allowed', async () => {
+      const readOnlyPath = `${mcpPath}/readonly`;
+      const readOnlyPair = await authorizeWithConsent({
+        metadata,
+        clientId: registration.client_id,
+        allowWrites: true,
+        resource: `${baseUrl}${readOnlyPath}`,
+      });
+      assert(readOnlyPair.scope === 'mcp:read', 'Read-only URL issued more than read scope');
+      for (const path of [readOnlyPath, mcpPath]) {
+        const tools = await mcpRequest(readOnlyPair.access_token, 'tools/list', {}, 34, path);
+        const names = (tools.body.result?.tools ?? []).map((tool: JsonObject) => tool.name);
+        assert(names.includes('log_list') && !names.includes('prompt_deploy'), `${path} is not read-only for this token`);
+      }
+      if (apiKey) {
+        const keyTools = await mcpRequest(apiKey, 'tools/list', {}, 35, readOnlyPath);
+        const names = (keyTools.body.result?.tools ?? []).map((tool: JsonObject) => tool.name);
+        assert(!names.includes('prompt_deploy'), 'Read-only URL lists write tools for an API key');
+      }
+    });
+
     await step('access expiry returns canonical 401', async () => {
       await new Promise((resolve) => setTimeout(resolve, 61_000));
       const expired = await mcpRequest(pair.access_token, 'tools/list', {}, 4);
@@ -417,6 +527,7 @@ async function run(): Promise<void> {
       assert(response.ok, 'Refresh failed');
       assert(responseBody.access_token !== pair.access_token, 'Access token did not rotate');
       assert(responseBody.refresh_token !== pair.refresh_token, 'Refresh token did not rotate');
+      assert(responseBody.scope === pair.scope, 'Refresh changed the granted scope');
       return responseBody;
     });
 

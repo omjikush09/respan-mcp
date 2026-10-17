@@ -7,14 +7,28 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { RespanClient } from '@respan/respan-api';
 import type { AuthenticatedClient } from './client.js';
 import { registerProductionTools } from '../production/index.js';
+import { registerGuardrailTools } from '../pulses/guardrails.js';
 import { registerPulseTools } from '../pulses/index.js';
 import { registerPromptTools } from '../develop/prompts.js';
 import { registerOrganizationTools } from '../account/organizations.js';
-import { applyToolPolicy } from './tool-policy.js';
+import {
+  applyToolPolicy,
+  hiddenWriteToolsOf,
+  removeWriteTools,
+} from './tool-policy.js';
+import { SERVER_INSTRUCTIONS } from './instructions.js';
 import { resolveToolName, rewriteToolCallNames } from './tool-aliases.js';
+import {
+  instrumentToolCalls,
+  noteAliasedCalls,
+  recordRequest,
+  telemetryContext,
+  type TelemetryContext,
+} from './telemetry.js';
 import { OAuthBroker, type ResolvedAccess } from '../oauth/broker.js';
 import { getOAuthConfig, type OAuthRealm } from '../oauth/config.js';
 import { InvalidAccessTokenError } from '../oauth/errors.js';
+import { isReadOnlySession, MCP_READ_SCOPE, MCP_WRITE_SCOPE, SUPPORTED_SCOPES } from '../oauth/scopes.js';
 import { getSessionStore } from '../oauth/store-factory.js';
 import { SessionStoreUnavailableError } from '../oauth/store.js';
 import {
@@ -25,11 +39,13 @@ import {
 export function createServer(
   client: AuthenticatedClient | null,
   enabledTools?: Set<string>,
+  telemetry?: TelemetryContext,
+  isReadOnly = false,
 ): McpServer {
-  const server = new McpServer({
-    name: 'respan',
-    version: '1.0.0',
-  });
+  const server = new McpServer(
+    { name: 'respan', version: '1.0.0' },
+    { instructions: SERVER_INSTRUCTIONS },
+  );
   applyToolPolicy(server);
   applyProductVocabulary(server);
   applyToolCatalog(server);
@@ -47,12 +63,19 @@ export function createServer(
       return originalRegisterTool.apply(server, arguments as any);
     };
   }
+  // Last, so it sees only the tools the filter above lets through.
+  if (telemetry) instrumentToolCalls(server, telemetry);
 
   registerProductionTools(server, client);
   registerPulseTools(server, client);
+  registerGuardrailTools(server, client);
   registerPromptTools(server, client);
   registerMonitorTools(server, client);
   registerOrganizationTools(server, client);
+  // After every tool is registered, so the decision reads each tool's final
+  // name and annotations. A tool the caller turned off via enabledTools was
+  // never registered, so it is not reported as hidden for lack of scope.
+  if (isReadOnly) removeWriteTools(server);
   return server;
 }
 
@@ -65,20 +88,98 @@ function canonicalPublicBaseUrl(): string {
   return (process.env.MCP_PUBLIC_BASE_URL || 'https://mcp.respan.ai').replace(/\/+$/, '');
 }
 
-function challenge(resourceMetadataPath: string): string {
-  return `Bearer resource_metadata="${canonicalPublicBaseUrl()}${resourceMetadataPath}"`;
+function challenge(resourceMetadataPath: string, scope?: string): string {
+  const scopeParam = scope ? `scope="${scope}", ` : '';
+  return `Bearer ${scopeParam}resource_metadata="${canonicalPublicBaseUrl()}${resourceMetadataPath}"`;
 }
 
+/** `scope` is set on a read-only URL, so a client asks for read scope only. */
 function sendUnauthorized(
   res: VercelResponse,
   resourceMetadataPath: string,
+  scope?: string,
 ): VercelResponse {
-  res.setHeader('WWW-Authenticate', challenge(resourceMetadataPath));
+  res.setHeader('WWW-Authenticate', challenge(resourceMetadataPath, scope));
   return res.status(401).json({
     jsonrpc: '2.0',
     error: { code: -32001, message: 'Unauthorized' },
     id: null,
   });
+}
+
+/** `message` as a tools/call request (it has an id) for a hidden write tool, if it is one. */
+function hiddenWriteToolRequest(
+  hidden: ReadonlySet<string>,
+  message: unknown,
+): { id: unknown; name: string } | undefined {
+  if (!message || typeof message !== 'object' || Array.isArray(message)) return undefined;
+  const { id, method, params } = message as { id?: unknown; method?: unknown; params?: { name?: unknown } };
+  if (id === undefined || method !== 'tools/call' || typeof params?.name !== 'string') return undefined;
+  // An old name reaches the same tool, so it is refused the same way.
+  const name = resolveToolName(params.name);
+  if (!hidden.has(name)) return undefined;
+  return { id, name };
+}
+
+/**
+ * The tools/call requests in `body` that target hidden write tools, when every
+ * message in it is one (a single request, or a batch made only of them). A
+ * mixed batch or an id-less message falls through to the transport, which
+ * still refuses the hidden tool (it was never registered), just without the
+ * insufficient_scope explanation.
+ */
+function hiddenWriteToolCalls(
+  server: McpServer,
+  body: unknown,
+): { id: unknown; name: string }[] | undefined {
+  const hidden = hiddenWriteToolsOf(server);
+  if (hidden.size === 0) return undefined;
+  const messages = Array.isArray(body) ? body : [body];
+  if (messages.length === 0) return undefined;
+  const blocked = messages.map((message) => hiddenWriteToolRequest(hidden, message));
+  return blocked.every((call) => call !== undefined)
+    ? (blocked as { id: unknown; name: string }[])
+    : undefined;
+}
+
+/**
+ * A tool error, not a protocol error, so the agent reads why and what to do.
+ * On a read-only consent, `_meta["mcp/www_authenticate"]` lets ChatGPT offer
+ * the user a new consent; on a read-only URL no consent can help, so the hint
+ * points at the full URL instead.
+ */
+function insufficientScopeResult(
+  toolName: string,
+  resourceMetadataPath: string,
+  readOnlyEndpointPath?: string,
+) {
+  const error = {
+    code: 'insufficient_scope',
+    message: `${toolName} changes data, and this connection is read-only.`,
+    hint: readOnlyEndpointPath
+      ? `This server URL (${readOnlyEndpointPath}) only serves read-only tools. `
+        + 'To change data, the user must connect to the same URL without /readonly, '
+        + 'with an API key that can write or a new sign-in that ticks "Also allow changes". '
+        + 'Read-only tools keep working here.'
+      : 'Ask the user to reconnect Respan and tick "Also allow changes" on the '
+        + 'consent page. The page offers that option only when this client requests '
+        + 'write access. Read-only tools keep working without it.',
+    // No scope enables writes on a read-only URL.
+    ...(readOnlyEndpointPath ? {} : { required_scope: MCP_WRITE_SCOPE }),
+  };
+  const scope = SUPPORTED_SCOPES.join(' ');
+  return {
+    content: [{ type: 'text', text: JSON.stringify({ error }) }],
+    isError: true,
+    ...(readOnlyEndpointPath ? {} : {
+      _meta: {
+        'mcp/www_authenticate': [
+          `Bearer error="insufficient_scope", scope="${scope}", `
+            + `resource_metadata="${canonicalPublicBaseUrl()}${resourceMetadataPath}"`,
+        ],
+      },
+    }),
+  };
 }
 
 function sdkBackendBaseUrl(baseUrl: string): string {
@@ -133,11 +234,18 @@ function sendWebResponse(
   res.status(response.status).send(response.body);
 }
 
+export type McpHandlerOptions = {
+  /** A /readonly URL: read-only tools only, whatever the credential allows. */
+  readOnlyEndpointPath?: string;
+};
+
 export function createMcpHandler(
   defaultBaseUrl: string,
   resourceMetadataPath: string,
   realm: OAuthRealm,
+  options: McpHandlerOptions = {},
 ) {
+  const challengeScope = options.readOnlyEndpointPath ? MCP_READ_SCOPE : undefined;
   return async function handler(req: VercelRequest, res: VercelResponse) {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, s-maxage=0');
     res.setHeader('CDN-Cache-Control', 'no-store');
@@ -175,11 +283,11 @@ export function createMcpHandler(
         backendCredential = oauthAccess.backendAccessJwt;
         baseUrl = sdkBackendBaseUrl(config.realms[realm].backendBaseUrl);
       } else if (bearer?.startsWith('mcp_')) {
-        return sendUnauthorized(res, resourceMetadataPath);
+        return sendUnauthorized(res, resourceMetadataPath, challengeScope);
       } else {
         backendCredential = bearer || process.env.RESPAN_API_KEY;
         if (!backendCredential) {
-          return sendUnauthorized(res, resourceMetadataPath);
+          return sendUnauthorized(res, resourceMetadataPath, challengeScope);
         }
         const configuredBaseUrl = (
           realm === 'enterprise'
@@ -213,27 +321,42 @@ export function createMcpHandler(
         ? new Set(enabledToolsHeader.split(',').map((tool) => resolveToolName(tool.trim())).filter(Boolean))
         : undefined;
 
-      const server = createServer(authenticatedClient, enabledTools);
+      // API keys carry their own permissions, enforced by the backend; only a
+      // read-only URL narrows them here.
+      const isReadOnly = Boolean(options.readOnlyEndpointPath)
+        || (oauthAccess ? isReadOnlySession(oauthAccess.session.scope) : false);
+      const telemetry = telemetryContext(realm, bearer, req.headers);
+      const server = createServer(authenticatedClient, enabledTools, telemetry, isReadOnly);
+      noteAliasedCalls(telemetry, req.body);
+      const renamedTools = rewriteToolCallNames(req.body);
+      const blockedCalls = hiddenWriteToolCalls(server, req.body);
+      if (blockedCalls) {
+        const responses = blockedCalls.map(({ id, name }) => ({
+          jsonrpc: '2.0',
+          id,
+          result: insufficientScopeResult(name, resourceMetadataPath, options.readOnlyEndpointPath),
+        }));
+        return res.status(200).json(Array.isArray(req.body) ? responses : responses[0]);
+      }
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
       });
       await server.connect(transport);
-      const renamedTools = rewriteToolCallNames(req.body);
-      if (renamedTools.length > 0) {
-        console.warn(`MCP tools/call used old tool name(s): ${renamedTools.join(', ')}`);
-      }
       const transportResponse = await transport.handleRequest(
         toWebRequest(req),
         { parsedBody: req.body },
       );
       const bufferedResponse = await bufferWebResponse(transportResponse);
+      // A revoked OAuth session turns the answer into the 401 challenge below.
+      const isAccepted = bufferedResponse.status < 400 && !(backendUnauthorized && oauthAccess);
+      recordRequest(server, telemetry, req.body, renamedTools, isAccepted);
 
       if (backendUnauthorized && oauthAccess) {
         await getSessionStore().deleteAccessSession(
           realm,
           oauthAccess.accessTokenHash,
         );
-        return sendUnauthorized(res, resourceMetadataPath);
+        return sendUnauthorized(res, resourceMetadataPath, challengeScope);
       }
       sendWebResponse(bufferedResponse, res);
     } catch (error) {
@@ -241,7 +364,7 @@ export function createMcpHandler(
         error instanceof InvalidAccessTokenError
         || (error instanceof Error && error.name === 'ZodError')
       ) {
-        return sendUnauthorized(res, resourceMetadataPath);
+        return sendUnauthorized(res, resourceMetadataPath, challengeScope);
       }
       if (error instanceof DisallowedBackendUrlError) {
         return res.status(400).json({

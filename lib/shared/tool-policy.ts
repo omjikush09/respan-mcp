@@ -78,3 +78,36 @@ export function applyToolPolicy(server: McpServer): void {
     return registered;
   };
 }
+
+const hiddenWriteTools = new WeakMap<McpServer, Set<string>>();
+
+/**
+ * For a read-only session: removes every registered tool whose final
+ * annotations do not say readOnlyHint: true, and records its name. A tool
+ * with readOnlyHint false or no annotation at all counts as a write, so a new
+ * tool stays hidden from read-only sessions until it is marked read-only on
+ * purpose. Call it after every tool is registered, so it sees each tool's
+ * product name (after applyProductVocabulary) and its final annotations
+ * (after applyToolPolicy), whichever API registered it.
+ */
+export function removeWriteTools(server: McpServer): void {
+  const hidden = new Set<string>();
+  hiddenWriteTools.set(server, hidden);
+  // The SDK keeps registered tools by name and has no public way to list them.
+  // The entry is deleted by key, not with tool.remove(): remove() deletes the
+  // name the tool was first registered under, so a tool renamed by
+  // applyProductVocabulary (org_switch -> workspace_switch) would stay listed.
+  const registered = (server as unknown as {
+    _registeredTools: Record<string, { annotations?: ToolAnnotations }>;
+  })._registeredTools;
+  for (const [name, tool] of Object.entries(registered)) {
+    if (tool.annotations?.readOnlyHint === true) continue;
+    hidden.add(name);
+    delete registered[name];
+  }
+}
+
+/** Tools removeWriteTools took off `server`; empty when it was not applied. */
+export function hiddenWriteToolsOf(server: McpServer): ReadonlySet<string> {
+  return hiddenWriteTools.get(server) ?? new Set();
+}

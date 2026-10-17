@@ -10,6 +10,7 @@ import {
   securelyMatchesHash,
 } from './crypto.js';
 import { emitOAuthEvent } from './events.js';
+import { grantedScope, hasWriteScope, MCP_READ_SCOPE, requestedScope } from './scopes.js';
 import { InvalidAccessTokenError, OAuthRequestError } from './errors.js';
 import {
   RECORD_VERSION,
@@ -35,6 +36,8 @@ export type TokenPair = {
   refresh_token: string;
   token_type: 'Bearer';
   expires_in: number;
+  /** Absent for sessions issued before scopes existed. */
+  scope?: string;
 };
 
 export type ResolvedAccess = {
@@ -56,6 +59,8 @@ type AuthorizationInput = {
   clientState: string;
   codeChallenge: string;
   resource?: string;
+  /** Raw `scope` from /authorize; see requestedScope(). */
+  scope?: string;
 };
 
 type CompleteAuthorizationInput = {
@@ -121,6 +126,7 @@ function tokenPairRecords(
     resource: code.resource,
     encryptedBackendAccessJwt: code.encryptedBackendAccessJwt,
     backendAccessExpiresAt: code.backendAccessExpiresAt,
+    ...(code.scope !== undefined ? { scope: code.scope } : {}),
     issuedAt: now,
     expiresAt: now + accessTtlSeconds * 1000,
   };
@@ -135,6 +141,7 @@ function tokenPairRecords(
     currentAccessTokenHash: accessTokenHash,
     encryptedBackendRefreshJwt: code.encryptedBackendRefreshJwt,
     backendRefreshExpiresAt: code.backendRefreshExpiresAt,
+    ...(code.scope !== undefined ? { scope: code.scope } : {}),
     issuedAt: now,
     absoluteExpiresAt: now + refreshTtlSeconds * 1000,
   };
@@ -144,6 +151,7 @@ function tokenPairRecords(
       refresh_token: refreshToken,
       token_type: 'Bearer',
       expires_in: accessTtlSeconds,
+      ...(code.scope !== undefined ? { scope: code.scope } : {}),
     },
     accessTokenHash,
     accessSession,
@@ -169,7 +177,10 @@ export class OAuthBroker {
     transaction: PendingAuthorization;
   }> {
     const realmConfig = this.dependencies.config.realms[input.realm];
-    const resource = input.resource || realmConfig.resource;
+    // The read-only URL asks for read scope only, and its token is bound to
+    // the canonical resource so it works on both URLs.
+    const isReadOnlyResource = input.resource === realmConfig.readOnlyResource;
+    const resource = isReadOnlyResource ? realmConfig.resource : input.resource || realmConfig.resource;
     if (resource !== realmConfig.resource) {
       throw new OAuthRequestError('invalid_request', 400, 'Invalid OAuth resource');
     }
@@ -188,6 +199,7 @@ export class OAuthBroker {
       resource,
       browserCsrfHash: hashBrowserCsrf(browserCsrf),
       isApproved: false,
+      requestedScope: isReadOnlyResource ? MCP_READ_SCOPE : requestedScope(input.scope),
       createdAt: now,
       expiresAt: now + this.dependencies.config.authorizationTransactionTtlSeconds * 1000,
     };
@@ -234,6 +246,7 @@ export class OAuthBroker {
     transactionToken: string,
     browserCsrf: string,
     encryptedBackendCookies?: string,
+    isWriteApproved = false,
   ): Promise<PendingAuthorization> {
     const stored = await this.getPendingAuthorization(
       realm,
@@ -245,6 +258,7 @@ export class OAuthBroker {
       ...stored.value,
       isApproved: true,
       approvedAt: now,
+      scope: grantedScope(stored.value.requestedScope, isWriteApproved),
       ...(encryptedBackendCookies ? { encryptedBackendCookies } : {}),
     };
     const ttlSeconds = Math.max(1, remainingSeconds(stored.value.expiresAt, now));
@@ -299,6 +313,7 @@ export class OAuthBroker {
         this.dependencies.config.secret,
       ),
       backendRefreshExpiresAt,
+      ...(stored.value.scope !== undefined ? { scope: stored.value.scope } : {}),
       createdAt: now,
       expiresAt: now + this.dependencies.config.authorizationCodeTtlSeconds * 1000,
     };
@@ -354,10 +369,14 @@ export class OAuthBroker {
       expectedChallenge !== code.codeChallenge
       || input.clientId !== code.clientId
       || input.redirectUri !== code.redirectUri
-      || (input.resource !== undefined && input.resource !== code.resource)
+      || (input.resource !== undefined && this.canonicalResource(code.realm, input.resource) !== code.resource)
       || code.resource !== this.dependencies.config.realms[code.realm].resource
     ) {
       throw new OAuthRequestError('invalid_grant', 400, 'Authorization code binding mismatch');
+    }
+    if (this.isWriteGrantForReadOnlyResource(code.realm, input.resource, code.scope)) {
+      emitOAuthEvent('read_only_resource_refused', code.realm, codeHash);
+      throw new OAuthRequestError('invalid_grant', 400, 'Authorization code is not read-only');
     }
     const records = tokenPairRecords(
       this.dependencies.config,
@@ -381,6 +400,25 @@ export class OAuthBroker {
     }
     emitOAuthEvent('code_exchange_succeeded', code.realm, codeHash);
     return records.pair;
+  }
+
+  /** Maps a realm's read-only URL to its canonical resource; others pass through. */
+  private canonicalResource(realm: OAuthRealm, resource: string | undefined): string | undefined {
+    const realmConfig = this.dependencies.config.realms[realm];
+    return resource === realmConfig.readOnlyResource ? realmConfig.resource : resource;
+  }
+
+  /**
+   * A token asked for on the read-only URL must be read-only. Grants that can
+   * write (or predate scopes) are refused rather than narrowed.
+   */
+  private isWriteGrantForReadOnlyResource(
+    realm: OAuthRealm,
+    resource: string | undefined,
+    scope: string | undefined,
+  ): boolean {
+    if (resource !== this.dependencies.config.realms[realm].readOnlyResource) return false;
+    return scope === undefined || hasWriteScope(scope);
   }
 
   private async findAuthorizationCode(codeHash: string) {
@@ -460,7 +498,7 @@ export class OAuthBroker {
       || record.backendRefreshExpiresAt <= now
       || record.clientId !== input.clientId
       || record.resource !== this.dependencies.config.realms[realm].resource
-      || (input.resource !== undefined && input.resource !== record.resource)
+      || (input.resource !== undefined && this.canonicalResource(realm, input.resource) !== record.resource)
     ) {
       await this.dependencies.store.deleteRefreshSession(
         realm,
@@ -468,6 +506,11 @@ export class OAuthBroker {
         record.currentAccessTokenHash,
       );
       throw new OAuthRequestError('invalid_grant', 400, 'Invalid refresh token');
+    }
+    // Refused, but the session is kept: it is still valid on /mcp.
+    if (this.isWriteGrantForReadOnlyResource(realm, input.resource, record.scope)) {
+      emitOAuthEvent('read_only_resource_refused', realm, refreshTokenHash);
+      throw new OAuthRequestError('invalid_grant', 400, 'Refresh token is not read-only');
     }
     const lockOwner = randomBytes(32).toString('base64url');
     const isLocked = await this.dependencies.store.acquireRefreshLock(
@@ -523,6 +566,8 @@ export class OAuthBroker {
           this.dependencies.config.secret,
         ),
         backendRefreshExpiresAt,
+        // Carried forward as issued: a refresh can never widen it.
+        ...(record.scope !== undefined ? { scope: record.scope } : {}),
         createdAt: now,
         expiresAt: now,
       };

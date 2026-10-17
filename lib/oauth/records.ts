@@ -5,6 +5,9 @@ export const RECORD_VERSION = 1 as const;
 const realmSchema = z.enum(['platform', 'enterprise']);
 const timestampSchema = z.number().int().nonnegative();
 const encryptedCredentialSchema = z.string().min(1);
+// Space-separated OAuth scopes (lib/oauth/scopes.ts). Optional so records
+// written before scopes existed still parse; those keep their old access.
+const scopeSchema = z.string().optional();
 
 export const pendingAuthorizationSchema = z.object({
   version: z.literal(RECORD_VERSION),
@@ -19,6 +22,8 @@ export const pendingAuthorizationSchema = z.object({
   browserCsrfHash: z.string().length(64),
   isApproved: z.boolean(),
   approvedAt: timestampSchema.optional(),
+  requestedScope: scopeSchema,
+  scope: scopeSchema,
   encryptedBackendCookies: encryptedCredentialSchema.optional(),
   createdAt: timestampSchema,
   expiresAt: timestampSchema,
@@ -35,6 +40,7 @@ export const authorizationCodeSchema = z.object({
   backendAccessExpiresAt: timestampSchema,
   encryptedBackendRefreshJwt: encryptedCredentialSchema,
   backendRefreshExpiresAt: timestampSchema,
+  scope: scopeSchema,
   createdAt: timestampSchema,
   expiresAt: timestampSchema,
 });
@@ -48,6 +54,7 @@ export const accessSessionSchema = z.object({
   resource: z.string().url(),
   encryptedBackendAccessJwt: encryptedCredentialSchema,
   backendAccessExpiresAt: timestampSchema,
+  scope: scopeSchema,
   issuedAt: timestampSchema,
   expiresAt: timestampSchema,
 });
@@ -63,6 +70,7 @@ export const refreshSessionSchema = z.object({
   currentAccessTokenHash: z.string().length(64),
   encryptedBackendRefreshJwt: encryptedCredentialSchema,
   backendRefreshExpiresAt: timestampSchema,
+  scope: scopeSchema,
   issuedAt: timestampSchema,
   absoluteExpiresAt: timestampSchema,
 });
