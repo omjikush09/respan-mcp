@@ -1,12 +1,8 @@
-import { applyToolCatalog } from '../../lib/shared/tool-catalog.js';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { registerDocTools } from '../../lib/docs/tools.js';
-import { applyToolPolicy } from '../../lib/shared/tool-policy.js';
+import { createDocsServer } from '../../lib/docs/tools.js';
 import { rewriteToolCallNames } from '../../lib/shared/tool-aliases.js';
 import {
-  instrumentToolCalls,
   noteAliasedCalls,
   recordRequest,
   telemetryContext,
@@ -33,17 +29,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    const server = new McpServer({
-      name: 'respan-docs',
-      version: '1.0.0',
-    });
-    applyToolPolicy(server);
-  applyToolCatalog(server);
-    // The docs server needs no credential, so every caller counts as 'none'.
+// The docs server needs no credential, so every caller counts as 'none'.
     const telemetry = telemetryContext('docs', undefined, req.headers, false);
-    instrumentToolCalls(server, telemetry);
-
-    registerDocTools(server);
+    const server = createDocsServer(telemetry);
 
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,

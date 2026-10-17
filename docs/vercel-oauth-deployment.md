@@ -120,7 +120,7 @@ cd /workspaces/respan-mcp
 git worktree list --porcelain
 git branch --show-current
 git status --short
-npm test
+npm run check
 npm run build
 git diff --check
 ```
@@ -546,7 +546,7 @@ If a secret is exposed:
 
 ### Verification
 
-- [ ] `npm test` passes.
+- [ ] `npm run check` passes.
 - [ ] `npm run build` passes.
 - [ ] `git diff --check` passes.
 - [ ] Preview metadata uses the Preview origin.
