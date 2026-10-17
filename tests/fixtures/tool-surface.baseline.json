@@ -1,6 +1,6 @@
 {
   "mcp": {
-    "tools_list_chars": 96929,
+    "tools_list_chars": 103165,
     "tool_names": [
       "behavior_grouped",
       "behavior_list",
@@ -19,6 +19,10 @@
       "error_group_get",
       "error_group_list",
       "error_timeseries",
+      "guardrail_grouped",
+      "guardrail_list",
+      "guardrail_summary",
+      "guardrail_timeseries",
       "incident_list",
       "log_get",
       "log_list",
