@@ -49,7 +49,7 @@ function fakeClient(responses: Array<{ status?: number; body: unknown }> = [{ bo
 describe('backend-catalog tools', () => {
   it('reuse backend contracts with product-specific analytics defaults', () => {
     const tools = capture(registerPulseTools, null);
-    expect(Object.keys(tools).length).toBe(17);
+    expect(Object.keys(tools).length).toBe(15);
     for (const [name, tool] of Object.entries(tools)) {
       if (!name.startsWith('behavior_settings_')) {
         const source = BACKEND_TOOLS.get(name)!.description;
@@ -106,13 +106,44 @@ describe('behavior tools', () => {
     expect(call(2)).toMatchObject({ method: 'DELETE', path: '/api/pulses/behaviors/custom/a%2Fb/' });
   });
 
-  it('analyzes one definition or a batch on the matching endpoint', async () => {
-    const { client, call } = fakeClient();
+  it('offers no tool that runs a Respan model to draft or judge a definition', () => {
+    const tools = capture(registerPulseTools, null);
+    expect(tools.custom_behavior_suggest).toBeUndefined();
+    expect(tools.custom_behavior_analyze).toBeUndefined();
+    // The catalog's create text says to suggest and analyze first; ours carries
+    // the rules instead, so the agent drafts and checks the definition itself.
+    expect(BACKEND_TOOLS.get('custom_behavior_create')!.description).toMatch(/suggest and analyze first/i);
+    const create = tools.custom_behavior_create.config;
+    expect(create.description).not.toMatch(/suggest|analyze/i);
+    expect(create.description).toMatch(/single conversation/);
+    expect(create.description).toMatch(/confirm the wording with the user/);
+    expect(create.description).toMatch(/every page of custom_behavior_list/);
+    expect(create.description).toMatch(/Always pass polarity/);
+    const update = tools.custom_behavior_update.config;
+    // Update keeps the catalog text and adds the same rules, so a session
+    // without create still sees them.
+    expect(update.description.startsWith(BACKEND_TOOLS.get('custom_behavior_update')!.description)).toBe(true);
+    expect(update.description).toMatch(/single conversation/);
+    expect(update.description).not.toMatch(/suggest|analyze/i);
+    // A PATCH keeps omitted fields, so update must not claim polarity defaults.
+    expect(update.description).not.toMatch(/stored as neutral/);
+    expect(update.description).toMatch(/Pass only the fields that change/);
+    // Same budget the hand-written tool descriptions are held to.
+    for (const name of ['custom_behavior_create', 'custom_behavior_update']) {
+      expect(tools[name].config.description!.length, name).toBeLessThan(1_200);
+    }
+  });
+
+  it('creates a behavior with a plain insert of the definition fields', async () => {
+    const { client, call } = fakeClient([{ body: { id: 'cb_1' } }]);
     const tools = capture(registerPulseTools, client);
-    await tools.custom_behavior_analyze.handler({ description: 'The agent refuses.' });
-    await tools.custom_behavior_analyze.handler({ descriptions: ['a', 'b'] });
-    expect(call(0)).toMatchObject({ path: '/api/pulses/behaviors/custom/analyze-definition/', body: { description: 'The agent refuses.' } });
-    expect(call(1)).toMatchObject({ path: '/api/pulses/behaviors/custom/analyze-definitions/', body: { descriptions: ['a', 'b'] } });
+    await tools.custom_behavior_create.handler({ name: 'Refund promise', description: 'agent promises a refund', polarity: 'negative' });
+    expect(call(0)).toEqual({
+      method: 'POST',
+      path: '/api/pulses/behaviors/custom/',
+      query: {},
+      body: { name: 'Refund promise', description: 'agent promises a refund', polarity: 'negative' },
+    });
   });
 });
 

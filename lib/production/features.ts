@@ -4,12 +4,24 @@ import { BACKEND_TOOLS } from '../shared/backend-tool.js';
 import { toZodShape } from '../generated/schema-to-zod.js';
 import { requireClient, rawFetch, type AuthenticatedClient } from '../shared/client.js';
 import { READ_ONLY_WORKSPACE_TOOL, INTERNAL_RESPONSE_KEYS, budgetedJson, omitKeys, textResult } from '../shared/tool-result.js';
-import { filterGuardError } from '../shared/filter-fields.js';
+import { addFilterCondition, filterGuardError, type BackendFilterBody } from '../shared/filter-fields.js';
 import { TRACE_FILTER_FIELD_SPEC } from './traces.js';
 import { timeWindowShape, environmentShape, resolveTimeWindow } from './params.js';
 
 const METRICS = ['number_of_requests', 'total_cost', 'total_tokens', 'average_cost', 'average_tokens', 'error_count', 'error_percentage', 'average_latency', 'average_ttft', 'average_tps', 'cache_hit_percentage'] as const;
 const BUDGET = { maxChars: 40_000, stringCaps: [2_000, 500, 200] };
+/**
+ * log_summary posts its filters to the backend as they are, so the backend's
+ * own description is kept and the list and group forms are added to it.
+ */
+const LOG_SUMMARY_FILTERS_NOTE = ' A field may also take a list of conditions, AND-ed, so a range is two conditions on one field: {"cost": [{"operator": "gt", "value": [0.05]}, {"operator": "lt", "value": [1]}]}. To OR conditions, wrap them in a group under any key, whose list sets "connector": "OR": {"cost_either": {"connector": "AND", "filter_params": {"cost": [{"operator": "lt", "value": [0.01]}, {"operator": "gt", "value": [1], "connector": "OR"}]}}}. Never set "connector": "OR" at the top level: it ORs with every condition before it, on any field. log_filter_schema lists the fields, their values and percentiles.';
+
+function logSummaryShape(): Record<string, z.ZodTypeAny> {
+  const shape = toZodShape(BACKEND_TOOLS.get('log_summary')!.inputSchema);
+  const filters = shape.filters;
+  return { ...shape, filters: filters.describe((filters.description ?? '') + LOG_SUMMARY_FILTERS_NOTE) };
+}
+
 const filtersSchema = z.record(z.object({ operator: z.string(), value: z.any() })).optional()
   .describe('Backend filter dictionary: {field: {operator, value}}. Filters select the input population before aggregation.');
 
@@ -32,18 +44,20 @@ export function registerFeatureTools(server: McpServer, client: AuthenticatedCli
       description: scope === 'traces'
         ? 'Count complete traces and summarize their duration, cost, tokens and errors. The unit is a trace, not a request. Defaults to the last 24 hours.'
         : 'Count and summarize individual requests: cost, tokens, latency, errors and optional scores. Defaults to the last 24 hours. Like the dashboard, excludes keyless spans unless filters.organization_key_id={operator:"",value:""} explicitly opts into all logs.',
-      inputSchema: { ...toZodShape(source.inputSchema), ...timeWindowShape, ...environmentShape },
+      inputSchema: { ...(scope === 'logs' ? logSummaryShape() : toZodShape(source.inputSchema)), ...timeWindowShape, ...environmentShape },
       annotations: READ_ONLY_WORKSPACE_TOOL,
     }, async (args: Record<string, any>) => {
       const c = requireClient(client);
       const window = resolveTimeWindow(args);
-      const filters = structuredClone(args.filters ?? {});
+      const filters: BackendFilterBody = structuredClone(args.filters ?? {});
       guardFilters(filters, scope);
       if (scope === 'logs') {
+        // A shortcut adds an AND condition; it never replaces a `filters`
+        // condition on the same field.
         for (const [key, op] of [['model', 'icontains'], ['status', ''], ['customer_identifier', ''], ['used_custom_credential', '']] as const) {
-          if (args[key] !== undefined) filters[key] = { operator: op, value: args[key] };
+          if (args[key] !== undefined) addFilterCondition(filters, key, { operator: op, value: args[key] });
         }
-        const override = filters.organization_key_id;
+        const override = filters.organization_key_id as { operator?: unknown; value?: unknown } | undefined;
         if (override && override.operator === '' && override.value === '') delete filters.organization_key_id;
         else if (!override) filters.organization_key_id = { operator: 'not_empty', value: true };
       }

@@ -10,6 +10,7 @@ export type OAuthEvent =
   | 'refresh_backend_failed'
   | 'invalid_access_token'
   | 'audience_mismatch'
+  | 'read_only_resource_refused'
   | 'session_store_failed';
 
 export function emitOAuthEvent(

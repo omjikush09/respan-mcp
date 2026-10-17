@@ -5,12 +5,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AuthenticatedClient } from "../shared/client.js";
 import { registerFeatureTools } from "./features.js";
+import { registerFilterSchemaTools } from "./filter-schema.js";
 import { registerLogTools } from "./logs.js";
 import { registerMetricTools } from "./metrics.js";
 import { registerTraceTools } from "./traces.js";
 
 export function registerProductionTools(server: McpServer, client: AuthenticatedClient | null) {
   registerLogTools(server, client);
+  registerFilterSchemaTools(server, client);
   registerTraceTools(server, client);
   registerMetricTools(server, client);
   registerFeatureTools(server, client);

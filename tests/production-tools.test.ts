@@ -2,6 +2,7 @@ import { registerThreadTools } from "../lib/production/threads.js";
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerProductionTools } from '../lib/production/index.js';
+import { fitFilterSchema } from '../lib/production/filter-schema.js';
 import { resolveTimeWindow } from '../lib/production/params.js';
 import { TRACE_FILTER_FIELDS } from '../lib/production/traces.js';
 import { VALIDATION_ERROR_CODE } from '../lib/shared/filter-fields.js';
@@ -65,6 +66,7 @@ describe('production tool surface', () => {
       'dashboard_llm_metrics_summary',
       'dashboard_top_models',
       'end_user_rank_by_usage',
+      'log_filter_schema',
       'log_get',
       'log_list',
       'error_timeseries',
@@ -127,7 +129,7 @@ describe('log_list', () => {
       status: 'failed',
       thread_identifier: 'chat-1',
       filters: [{ field: 'latency', operator: 'gt', value: [5] }],
-      page_size: 50,
+      page_size: 500,
     });
     const { path, query, body } = call();
     expect(path).toBe('/api/request-logs/list/');
@@ -137,7 +139,7 @@ describe('log_list', () => {
       environment: 'prod',
       sort_by: '-timestamp',
       page: '1',
-      page_size: '10',
+      page_size: '100',
     });
     expect(query.include_fields.split(',')).toContain('unique_id');
     expect(body).toEqual({
@@ -147,6 +149,32 @@ describe('log_list', () => {
         model: { operator: 'icontains', value: ['gpt-4o'] },
         status: { operator: '', value: ['failed'] },
         thread_identifier: { operator: '', value: ['chat-1'] },
+      },
+    });
+  });
+
+  it('sends every condition on one field, and keeps a filter the model shortcut also sets', async () => {
+    const { client, call } = fakeClient();
+    const { log_list } = captureTools(client);
+    await log_list.handler({
+      model: 'gpt-4o',
+      filters: [
+        { field: 'cost', operator: 'gte', value: [0.05] },
+        { field: 'cost', operator: 'lt', value: [1] },
+        { field: 'model', operator: 'not', value: ['gpt-4o-mini'] },
+      ],
+    });
+    expect(call().body).toEqual({
+      operator: 'AND',
+      filters: {
+        cost: [
+          { operator: 'gte', value: [0.05] },
+          { operator: 'lt', value: [1] },
+        ],
+        model: [
+          { operator: 'not', value: ['gpt-4o-mini'] },
+          { operator: 'icontains', value: ['gpt-4o'] },
+        ],
       },
     });
   });
@@ -172,10 +200,133 @@ describe('log_list', () => {
     });
     const { log_list } = captureTools(client);
     const result = parsed(await log_list.handler({ page_size: 5 }));
-    expect(result).toMatchObject({ page: 1, page_size: 5, has_more: true });
+    expect(result).toMatchObject({ page: 1, page_size: 5, has_more: true, returned: 1, next_page: 2 });
     // The endpoint's `count` is the page length, so no total is reported.
     expect(result).not.toHaveProperty('total');
+    expect(result).not.toHaveProperty('truncated');
     expect(result.results).toEqual([{ unique_id: 'log-1', model: 'gpt-4o', cost: 0.01 }]);
+  });
+
+  it('defaults to 25 rows and says when page_size was capped', async () => {
+    const { client } = fakeClient();
+    const { log_list } = captureTools(client);
+    expect(parsed(await log_list.handler({})).page_size).toBe(25);
+    expect(parsed(await log_list.handler({ page_size: 1000 }))).toMatchObject({
+      page_size: 100,
+      page_size_capped_from: 1000,
+    });
+  });
+
+  it('adds the requested fields to the backend query and to each row', async () => {
+    const { client, call } = fakeClient({
+      results: [{ id: 'log-1', model: 'gpt-4o', environment: 'prod', provider_id: 'openai', full_request: 'x' }],
+    });
+    const { log_list } = captureTools(client);
+    const result = parsed(await log_list.handler({ fields: ['environment', 'provider_id'] }));
+    expect(call().query.include_fields.split(',')).toEqual(expect.arrayContaining(['environment', 'provider_id']));
+    expect(result.results).toEqual([{ unique_id: 'log-1', model: 'gpt-4o', environment: 'prod', provider_id: 'openai' }]);
+  });
+
+  it('shortens strings first and says so, keeping every row and next_page', async () => {
+    const rows = Array.from({ length: 100 }, (_, i) => ({
+      id: `log-${i}`,
+      error_message: 'x'.repeat(290),
+      metadata: { request: 'y'.repeat(290), session: 'z'.repeat(290) },
+    }));
+    const { client } = fakeClient({ results: rows, next: 'https://api.example.invalid/?page=2' });
+    const { log_list } = captureTools(client);
+    const text = (await log_list.handler({ page_size: 100, fields: ['metadata'] })).content[0].text;
+    const result = JSON.parse(text);
+
+    expect(text.length).toBeLessThanOrEqual(40_000);
+    expect(result.returned).toBe(100);
+    expect(result.truncated).toMatchObject({ strings_shortened_to: expect.any(Number), hint: expect.stringContaining('log_get') });
+    expect(result.truncated).not.toHaveProperty('omitted_rows');
+    expect(result.next_page).toBe(2);
+  });
+
+  it('reduces rows to their ids from the end as a last resort, keeping next_page', async () => {
+    const metadata = Object.fromEntries(Array.from({ length: 40 }, (_, k) => [`key_${k}`, 'm'.repeat(200)]));
+    const rows = Array.from({ length: 100 }, (_, i) => ({ id: `log-${i}`, trace_unique_id: `trace-${i}`, metadata }));
+    const { client } = fakeClient({ results: rows, next: 'https://api.example.invalid/?page=2' });
+    const { log_list } = captureTools(client);
+    const text = (await log_list.handler({ page_size: 100, fields: ['metadata'] })).content[0].text;
+    const result = JSON.parse(text);
+
+    expect(text.length).toBeLessThanOrEqual(40_000);
+    expect(result.returned).toBe(100);
+    const reduced = result.truncated.rows_reduced_to_ids;
+    expect(reduced).toBeGreaterThan(0);
+    expect(result.results[0]).toHaveProperty('metadata');
+    expect(result.results[99]).toEqual({ unique_id: 'log-99', trace_unique_id: 'trace-99' });
+    expect(result.results.filter((row: object) => !('metadata' in row))).toHaveLength(reduced);
+    expect(result.truncated).not.toHaveProperty('omitted_rows');
+    expect(result.truncated.hint).toContain('log_get');
+    // Every row is on the page, so moving on skips nothing.
+    expect(result.next_page).toBe(2);
+    // One more full row would not have fit.
+    const fullRow = JSON.stringify(result.results[0]).length;
+    expect(text.length + fullRow).toBeGreaterThan(40_000);
+  });
+
+  it('does not claim text was shortened when only rows were reduced', async () => {
+    const metadata = Object.fromEntries(Array.from({ length: 200 }, (_, k) => [`key_${k}`, 'm'.repeat(40)]));
+    const rows = Array.from({ length: 100 }, (_, i) => ({ id: `log-${i}`, trace_unique_id: `trace-${i}`, metadata }));
+    const { client } = fakeClient({ results: rows, next: 'https://api.example.invalid/?page=2' });
+    const { log_list } = captureTools(client);
+    const result = parsed(await log_list.handler({ page_size: 100, fields: ['metadata'] }));
+    expect(result.truncated.rows_reduced_to_ids).toBeGreaterThan(0);
+    expect(result.truncated).not.toHaveProperty('strings_shortened_to');
+    expect(result.truncated.hint).toContain('log_get');
+    expect(result.truncated.hint).not.toContain('shortened');
+  });
+
+  it('reports the preview cut even when the page fits', async () => {
+    const { client } = fakeClient({ results: [{ id: 'log-1', error_message: 'e'.repeat(2_000) }] });
+    const { log_list } = captureTools(client);
+    const result = parsed(await log_list.handler({}));
+    expect(result.results[0].error_message.length).toBeLessThan(400);
+    expect(result.truncated).toMatchObject({ strings_shortened_to: 300, hint: expect.stringContaining('log_get') });
+  });
+
+  it('keeps ids and filterable names whole while shortening everything else', async () => {
+    const traceId = `trace-${'t'.repeat(100)}`;
+    const model = `accounts/fireworks/models/${'l'.repeat(60)}`;
+    const rows = Array.from({ length: 100 }, (_, i) => ({
+      id: `log-${i}`,
+      trace_unique_id: traceId,
+      model,
+      error_message: 'x'.repeat(290),
+      metadata: { request: 'y'.repeat(290), session: 'z'.repeat(290) },
+    }));
+    const { client } = fakeClient({ results: rows });
+    const { log_list } = captureTools(client);
+    const result = parsed(await log_list.handler({ page_size: 100, fields: ['metadata'] }));
+    expect(result.truncated.strings_shortened_to).toBeLessThan(100);
+    expect(result.results[0]).toMatchObject({ trace_unique_id: traceId, model });
+  });
+
+  it('drops rows only when even their ids do not fit, then withholds next_page', async () => {
+    const rows = Array.from({ length: 100 }, (_, i) => ({ id: `log-${i}-${'u'.repeat(500)}` }));
+    const { client } = fakeClient({ results: rows });
+    const { log_list } = captureTools(client);
+    const text = (await log_list.handler({ page_size: 100 })).content[0].text;
+    const result = JSON.parse(text);
+    expect(text.length).toBeLessThanOrEqual(40_000);
+    expect(result.returned).toBeLessThan(100);
+    expect(result.truncated.omitted_rows).toBe(100 - result.returned);
+    expect(result.truncated.hint).toContain('smaller page_size');
+    expect(result).not.toHaveProperty('next_page');
+    // The backend had no next page, but the dropped rows are still unread.
+    expect(result.has_more).toBe(true);
+  });
+
+  it('leaves a string alone when the marker would make it longer', async () => {
+    const { client } = fakeClient({ results: [{ id: 'log-1', model: 'm'.repeat(305) }] });
+    const { log_list } = captureTools(client);
+    const result = parsed(await log_list.handler({}));
+    expect(result.results[0].model).toBe('m'.repeat(305));
+    expect(result).not.toHaveProperty('truncated');
   });
 });
 
@@ -244,7 +395,7 @@ describe('trace_list', () => {
     });
     const { path, query, body } = call();
     expect(path).toBe('/api/traces/list/');
-    expect(query).toMatchObject({ sort_by: '-total_cost', page: '1', page_size: '5' });
+    expect(query).toMatchObject({ sort_by: '-total_cost', page: '1', page_size: '20' });
     expect(body).toEqual({
       filters: {
         customer_identifier: { operator: '', value: ['user-7'] },
@@ -252,6 +403,39 @@ describe('trace_list', () => {
         error_count: { operator: 'gt', value: [0] },
       },
     });
+  });
+
+  it('keeps a filter on a field a shortcut also sets', async () => {
+    const { client, call } = fakeClient();
+    const { trace_list } = captureTools(client);
+    await trace_list.handler({
+      errors_only: true,
+      filters: [{ field: 'error_count', operator: 'lt', value: [5] }],
+    });
+    expect(call().body).toEqual({
+      filters: {
+        error_count: [
+          { operator: 'lt', value: [5] },
+          { operator: 'gt', value: [0] },
+        ],
+      },
+    });
+  });
+
+  it('rejects an OR connector before calling the backend, which refuses filter groups on traces', async () => {
+    const { client, fetchMock } = fakeClient();
+    const { trace_list } = captureTools(client);
+    const result = await trace_list.handler({
+      filters: [
+        { field: 'model', operator: 'icontains', value: ['claude'] },
+        { field: 'model', operator: 'icontains', value: ['gpt'], connector: 'OR' },
+      ],
+    });
+    expect(result.isError).toBe(true);
+    const error = parsed(result).error;
+    expect(error.code).toBe(VALIDATION_ERROR_CODE);
+    expect(error.unsupported_fields).toEqual(['model']);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('shortens input and output previews', async () => {
@@ -263,6 +447,30 @@ describe('trace_list', () => {
     const [row] = parsed(await trace_list.handler({})).results;
     expect(row).not.toHaveProperty('storage_object_key');
     expect(row.input.length).toBeLessThan(300);
+  });
+
+  it('defaults to 20 rows, caps at 50 and says so, and keeps trace ids whole', async () => {
+    const traceId = `trace-${'t'.repeat(100)}`;
+    const rows = Array.from({ length: 50 }, () => ({
+      trace_unique_id: traceId,
+      customer_identifier: 'c'.repeat(60),
+      name: 'n'.repeat(100),
+      input: 'i'.repeat(190),
+      output: 'o'.repeat(190),
+      model: 'm'.repeat(190),
+      environment: 'e'.repeat(190),
+    }));
+    const { client, call } = fakeClient({ results: rows, next: 'https://api.example.invalid/?page=2' });
+    const { trace_list } = captureTools(client);
+    const text = (await trace_list.handler({ page_size: 500 })).content[0].text;
+    const result = JSON.parse(text);
+    expect(call().query.page_size).toBe('50');
+    expect(text.length).toBeLessThanOrEqual(40_000);
+    expect(result).toMatchObject({ page_size: 50, page_size_capped_from: 500, returned: 50, next_page: 2 });
+    expect(result.truncated).toMatchObject({ hint: expect.stringContaining('trace_get') });
+    expect(result.results[0].trace_unique_id).toBe(traceId);
+    // name is an exact-match filter, so it is never shortened.
+    expect(result.results[0].name).toBe('n'.repeat(100));
   });
 });
 
@@ -370,5 +578,118 @@ describe('metric tools', () => {
     const { query, body } = call();
     expect(query).toMatchObject({ breakdown_by: 'customer_identifier', sort_by: 'number_of_requests', limit: '10' });
     expect(body).toEqual({ filters: { model: { operator: 'icontains', value: 'claude' } } });
+  });
+});
+
+describe('log_filter_schema', () => {
+  it('reads the backend filter schema with a GET and passes the environment', async () => {
+    const schema = {
+      filters: [{ metric: 'latency', name: 'Generation', type: 'number', operators: ['lte', '', 'gte'],
+        percentiles: { p50: 1.2, p90: 4.4 }, measured_rows: 900, measured_over: "log_type = 'chat'" }],
+      operators: { gte: 'greater than or equal' },
+      measurements: { is_measured: true },
+    };
+    const { client, call } = fakeClient(schema);
+    const { log_filter_schema } = captureTools(client);
+
+    const result = parsed(await log_filter_schema.handler({ environment: 'prod' }));
+
+    expect(call()).toMatchObject({ path: '/api/request-logs/filter-schema/', method: 'GET', query: { environment: 'prod' } });
+    expect(call().body).toBeUndefined();
+    expect(result).toEqual(schema);
+  });
+
+  it('sends no environment when none is asked for', async () => {
+    const { client, call } = fakeClient({ filters: [], operators: {}, measurements: { is_measured: false } });
+    const { log_filter_schema } = captureTools(client);
+
+    await log_filter_schema.handler({});
+
+    expect(call().query).toEqual({});
+  });
+
+  it('says the backend lacks the endpoint when it answers 404', async () => {
+    const { client, fetchMock } = fakeClient();
+    fetchMock.mockImplementationOnce(async () => new Response(JSON.stringify({ detail: 'Not found.' }), { status: 404 }));
+    const { log_filter_schema } = captureTools(client);
+
+    const result = await log_filter_schema.handler({});
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('not available on this Respan backend');
+  });
+
+  it('drops whole metadata example values first, keeping closed vocabularies whole', async () => {
+    const value = 'tenant-value-0000000';
+    const status = { metric: 'status', operators: [''], example_values: ['success', 'failed'], value_count: 2, value_labels: { failed: 'Error' } };
+    const metadata = Array.from({ length: 100 }, (_, i) => ({
+      metric: `metadata__key_${i}`,
+      operators: ['', 'in'],
+      example_values: Array.from({ length: 30 }, (__, j) => `${value}${j}`),
+    }));
+    const { client } = fakeClient({ filters: [status, ...metadata], operators: {}, measurements: { is_measured: true } });
+    const { log_filter_schema } = captureTools(client);
+
+    const result = await log_filter_schema.handler({});
+    const body = parsed(result);
+
+    expect(result.content[0].text.length).toBeLessThanOrEqual(40_000);
+    expect(body.filters).toHaveLength(101);
+    expect(body.filters[0]).toEqual(status);
+    expect(body.filters[1].example_values).toEqual(Array.from({ length: 10 }, (_, j) => `${value}${j}`));
+  });
+
+  it('drops the labels of values it drops, then metadata keys as a last resort', () => {
+    const ids = Array.from({ length: 30 }, (_, j) => `prompt-${j}`);
+    const prompt = {
+      metric: 'prompt_id',
+      example_values: ids,
+      value_count: 30,
+      value_labels: Object.fromEntries(ids.map((id) => [id, 'x'.repeat(2_000)])),
+    };
+    const metadata = Array.from({ length: 100 }, (_, i) => ({ metric: `metadata__${'k'.repeat(400)}${i}` }));
+
+    const body = JSON.parse(fitFilterSchema({ filters: [prompt, ...metadata], metadata_filters_omitted: 5 }));
+
+    expect(body.filters).toEqual([{ ...prompt, example_values: ids.slice(0, 3), value_labels: Object.fromEntries(ids.slice(0, 3).map((id) => [id, 'x'.repeat(2_000)])) }]);
+    expect(body.metadata_filters_omitted).toBe(105);
+  });
+
+  it('still throws other backend errors', async () => {
+    const { client, fetchMock } = fakeClient();
+    fetchMock.mockImplementationOnce(async () => new Response('denied', { status: 403 }));
+    const { log_filter_schema } = captureTools(client);
+
+    await expect(log_filter_schema.handler({})).rejects.toThrow(/^403 /);
+  });
+});
+
+describe('log_summary filters', () => {
+  it('teaches the list and OR-group forms on top of the backend description', () => {
+    const description = (captureTools(null).log_summary.config.inputSchema as any).filters.description as string;
+    expect(description).toContain('Supported fields (closed set)');
+    expect(description).toContain('a range is two conditions on one field');
+    expect(description).toContain('"filter_params"');
+    expect(description).toContain('Never set "connector": "OR" at the top level');
+  });
+
+  it('adds a shortcut to a filter on the same field instead of replacing it', async () => {
+    const { client, call } = fakeClient({ number_of_requests: 1 });
+    const { log_summary } = captureTools(client);
+    await log_summary.handler({
+      model: 'gpt-4o',
+      filters: {
+        model: { operator: 'not', value: ['gpt-4o-mini'] },
+        cost: [{ operator: 'gte', value: [0.05] }, { operator: 'lt', value: [1] }],
+      },
+    });
+    expect(call().body.filters).toEqual({
+      model: [
+        { operator: 'not', value: ['gpt-4o-mini'] },
+        { operator: 'icontains', value: 'gpt-4o' },
+      ],
+      cost: [{ operator: 'gte', value: [0.05] }, { operator: 'lt', value: [1] }],
+      organization_key_id: { operator: 'not_empty', value: true },
+    });
   });
 });

@@ -4,6 +4,7 @@
 // paging, and the advanced filter condition.
 
 import { z } from "zod";
+import { FILTER_CONNECTORS } from "../shared/filter-fields.js";
 
 /** EnvironmentChoices in the backend (utils/constants/environment_constants.py). */
 export const ENVIRONMENTS = ["prod", "stage", "test"] as const;
@@ -37,6 +38,11 @@ export function pageShape(defaultSize: number, maxSize: number) {
   };
 }
 
+/** Tells the caller when its page_size was capped, instead of capping silently. */
+export function pageSizeNote(requested: number | undefined, maxSize: number) {
+  return requested !== undefined && requested > maxSize ? { page_size_capped_from: requested } : {};
+}
+
 export function resolvePage(
   args: { page?: number; page_size?: number },
   defaultSize: number,
@@ -56,12 +62,15 @@ function parseTime(value: string, name: string): Date {
   return parsed;
 }
 
-/** Fills in the default 24-hour window and normalizes both ends to ISO 8601. */
-export function resolveTimeWindow(args: { start_time?: string; end_time?: string }) {
+/** Fills in the default window (24 hours unless given) and normalizes both ends to ISO 8601. */
+export function resolveTimeWindow(
+  args: { start_time?: string; end_time?: string },
+  defaultWindowMs: number = DEFAULT_WINDOW_MS,
+) {
   const end = args.end_time ? parseTime(args.end_time, "end_time") : new Date();
   const start = args.start_time
     ? parseTime(args.start_time, "start_time")
-    : new Date(end.getTime() - DEFAULT_WINDOW_MS);
+    : new Date(end.getTime() - defaultWindowMs);
   if (start >= end) throw new Error("start_time must be before end_time.");
   return { start_time: start.toISOString(), end_time: end.toISOString() };
 }
@@ -78,8 +87,11 @@ export const FILTER_OPERATORS = [
   "contains",
   "icontains",
   "startswith",
+  "not_startswith",
   "endswith",
   "isnull",
+  "empty",
+  "not_empty",
 ] as const;
 
 export function filterConditionSchema(fieldDescription: string) {
@@ -87,10 +99,14 @@ export function filterConditionSchema(fieldDescription: string) {
     field: z.string().describe(fieldDescription),
     operator: z
       .enum(FILTER_OPERATORS)
-      .describe("'' = equals, 'not' = not equal, 'in' = any of the values, 'lt'/'lte'/'gt'/'gte' = comparisons, 'icontains' = case-insensitive substring, 'isnull' = null check."),
+      .describe("'' = equals, 'not' = not equal, 'in' = any of the values, 'lt'/'lte'/'gt'/'gte' = comparisons, 'contains'/'icontains' = substring (icontains ignores case), 'startswith'/'not_startswith'/'endswith' = prefix or suffix, 'isnull' = null check (value [true] or [false]), 'empty'/'not_empty' = has no value / has a value (send value [true])."),
     value: z
       .array(z.union([z.string(), z.number(), z.boolean()]))
       .describe("Value(s) as an array, e.g. [5], ['gpt-4o'], [true]."),
+    connector: z
+      .enum(FILTER_CONNECTORS)
+      .optional()
+      .describe("Joins this condition to the previous one on the same field: 'AND' (default) or 'OR'."),
   });
 }
 

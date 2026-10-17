@@ -445,19 +445,25 @@
                     <div class="oauth-warning">Unverified OAuth client</div>
                     <strong id="oauth-client-name"></strong> is requesting access.
                     <p class="oauth-access-warning">
-                        Respan has not verified this client. Approval grants access to
-                        every MCP tool allowed by your account, including tools that
-                        can read or change data.
+                        Respan has not verified this client. Approval lets it read your
+                        Respan data: logs, traces, prompts, datasets and evaluations.
                     </p>
                     <p class="oauth-access-warning">
                         Callback destination: <strong id="oauth-redirect-host"></strong>
                     </p>
                     <code id="oauth-redirect-uri"></code>
+                    <label class="oauth-approval" id="oauth-allow-writes-row" style="display: none;">
+                        <input type="checkbox" id="oauth-allow-writes">
+                        <span>
+                            Also allow changes: create, update, deploy and delete prompts,
+                            datasets, evaluators and monitors. Leave this off to keep the
+                            client read-only.
+                        </span>
+                    </label>
                     <label class="oauth-approval">
                         <input type="checkbox" id="oauth-approve">
                         <span>
-                            I understand this unverified client will receive full MCP
-                            access and approve this exact callback.
+                            I approve this unverified client and this exact callback.
                         </span>
                     </label>
                     <button class="btn-default" id="oauth-cancel" type="button" style="margin-top: 12px;">
@@ -664,6 +670,7 @@
                 $('#oauth-client-name').textContent = data.client_name;
                 $('#oauth-redirect-uri').textContent = data.redirect_uri;
                 $('#oauth-redirect-host').textContent = new URL(data.redirect_uri).host;
+                $('#oauth-allow-writes-row').style.display = data.is_write_requested ? 'flex' : 'none';
                 $('#oauth-confirmation').style.display = 'block';
             } catch {
                 showError('Unable to load the authorization request.');
@@ -758,6 +765,7 @@
                 oauth_csrf: oauthParams.csrf,
                 enterprise: Boolean(oauthParams.enterprise),
                 approve: $('#oauth-approve').checked,
+                allow_writes: $('#oauth-allow-writes').checked,
             };
         }
 
