@@ -1,6 +1,19 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { fetchDocEntries, searchDocs } from './search.js';
+import { applyToolPolicy } from '../shared/tool-policy.js';
+import { applyToolCatalog } from '../shared/tool-catalog.js';
+import { instrumentToolCalls, type TelemetryContext } from '../shared/telemetry.js';
+
+/** The /mcp/docs server: shared by api/mcp/docs.ts and the tool-surface test. */
+export function createDocsServer(telemetry?: TelemetryContext): McpServer {
+  const server = new McpServer({ name: 'respan-docs', version: '1.0.0' });
+  applyToolPolicy(server);
+  applyToolCatalog(server);
+  if (telemetry) instrumentToolCalls(server, telemetry);
+  registerDocTools(server);
+  return server;
+}
 
 export function registerDocTools(server: McpServer): void {
   server.tool(

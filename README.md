@@ -219,6 +219,20 @@ cd ../respan-backend
 
 If a tool this server registers was renamed or removed in the backend, startup fails loudly rather than dropping it.
 
+### Telemetry
+
+The hosted endpoints (`/mcp`, `/mcp/enterprise`, `/mcp/docs`) write one JSON line to stdout for each of these events. On Vercel the lines land in the runtime logs (`lib/shared/telemetry.ts`).
+
+| `event` | When | Main fields |
+|---|---|---|
+| `mcp.tool_call` | Every well-formed `tools/call`, including calls whose arguments fail the tool's input schema and calls to a tool this server does not have (a request the SDK rejects as malformed JSON-RPC, such as non-object `arguments`, is not a tool call and is not logged) | `tool` (the current product name, also when the client called an old name), `category` (the tool's `respan/category`; absent for a tool this server does not have), `alias_used` and, when it is true, `alias` (the old name the client sent), `status` (`ok`, `tool_error`, `exception`, `invalid_arguments`, `unknown_tool`), `latency_ms`, `result_chars`, `arg_keys` (the names the client sent), `http_status`, `error_class` |
+| `mcp.session_init` | An `initialize` the server completed | `client_name`, `client_version`, `requested_protocol_version` |
+| `mcp.tool_alias` | A request whose `tools/call` used an old tool name, written even when the transport rejects the request and no `mcp.tool_call` follows (old names in the `Respan-Enabled-Tools` header are not counted) | `old_names` |
+
+Every line also carries `realm`, `auth_kind` (`oauth`, `jwt`, `api_key`, `env`, `none`), `user_agent`, `protocol_version` and, when there is a bearer, `session_key`. The `session_key` is the first 12 hex characters of a SHA-256 of the bearer under a fixed telemetry prefix, so the stateless calls made with one credential can be grouped together but the key cannot be matched against the token hashes the OAuth session store keeps. It changes when an OAuth or JWT token is refreshed, and `/mcp/docs`, which takes no credential, logs none. One request writes at most 50 `mcp.tool_call` lines, and name lists are capped at 32 entries.
+
+Argument values, tool results and credentials are never logged. stdio is not instrumented, because there stdout carries the protocol and the process runs on the user's machine.
+
 ---
 
 ## Enterprise Configuration
@@ -250,7 +264,25 @@ For custom API endpoints, set the `RESPAN_API_BASE_URL` environment variable:
 ```bash
 npm run build        # Compile TypeScript
 npm run stdio        # Build and run in stdio mode
+npm run check        # Type-check the source, tests and scripts, then run the tests
 ```
+
+CI (`.github/workflows/ci.yml`) runs `npm ci`, `npm run check` and
+`npm run build` on every pull request. Vercel deploys main to Production on
+merge without running tests, so a red check means the change is not ready to
+merge.
+
+`tests/tool-surface.test.ts` checks every tool clients see:
+- the tool name;
+- the description length (Claude Code truncates past 2,048 characters);
+- that the input schema compiles;
+- the tool names, the total `tools/list` size (up to 10% growth is allowed)
+  and which tools lack a title (a new tool must have one), against
+  `tests/fixtures/tool-surface.baseline.json`.
+
+If you add, remove or rename tools, or grow the list past the allowance, the
+check fails: run `npm run surface:update` and commit the new baseline with the
+change, so the name and size diff show up in review.
 
 ### Local OAuth broker
 
@@ -350,7 +382,7 @@ procedure, see [Public MCP OAuth Broker: Vercel Deployment Runbook](docs/vercel-
 Automated checks:
 
 ```bash
-npm test
+npm run check
 TEST_REDIS_URL=redis://127.0.0.1:6379/15 npm test -- --run tests/redis-store.integration.test.ts
 npm run build
 git diff --check
