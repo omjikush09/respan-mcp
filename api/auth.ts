@@ -160,6 +160,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           context.transactionId,
           context.csrf,
           encryptCredential(backendCookies, config!.secret),
+          body.allow_writes === true,
         );
         const { _backend_cookies: ignored, ...safeData } = data;
         void ignored;
@@ -245,6 +246,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           context.realm,
           context.transactionId,
           context.csrf,
+          undefined,
+          body.allow_writes === true,
         );
       }
       backendUrl = `${origin}/auth/jwt/create/`;

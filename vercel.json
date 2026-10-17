@@ -4,10 +4,14 @@
   "outputDirectory": "dist/client",
   "rewrites": [
     { "source": "/mcp", "destination": "/api/mcp" },
+    { "source": "/mcp/readonly", "destination": "/api/mcp/readonly" },
+    { "source": "/mcp/enterprise/readonly", "destination": "/api/mcp/enterprise-readonly" },
     { "source": "/mcp/enterprise", "destination": "/api/mcp/enterprise" },
     { "source": "/mcp/docs", "destination": "/api/mcp/docs" },
     { "source": "/auth", "destination": "/api/auth" },
     { "source": "/login", "destination": "/login.html" },
+    { "source": "/.well-known/oauth-protected-resource/mcp/readonly", "destination": "/api/well-known/oauth-protected-resource-readonly" },
+    { "source": "/.well-known/oauth-protected-resource/mcp/enterprise/readonly", "destination": "/api/well-known/oauth-protected-resource-enterprise-readonly" },
     { "source": "/.well-known/oauth-protected-resource/mcp", "destination": "/api/well-known/oauth-protected-resource" },
     { "source": "/.well-known/oauth-protected-resource/mcp/enterprise", "destination": "/api/well-known/oauth-protected-resource-enterprise" },
     { "source": "/.well-known/oauth-protected-resource/enterprise", "destination": "/api/well-known/oauth-protected-resource-enterprise" },
@@ -56,7 +60,7 @@
     {
       "source": "/login",
       "headers": [
-        { "key": "Content-Security-Policy", "value": "default-src 'self'; script-src 'sha256-Ccs6f8zCGgPjYKTgZcG3fRas8aOTOlHTqaAdiUZR9Hw='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" },
+        { "key": "Content-Security-Policy", "value": "default-src 'self'; script-src 'sha256-ptaWkIy3UFEvtSL26a/ugTD2BqY+MpfzzIFnJwlrhGg='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" },
         { "key": "Referrer-Policy", "value": "no-referrer" },
         { "key": "X-Content-Type-Options", "value": "nosniff" },
         { "key": "X-Frame-Options", "value": "DENY" },
@@ -67,7 +71,7 @@
     {
       "source": "/login.html",
       "headers": [
-        { "key": "Content-Security-Policy", "value": "default-src 'self'; script-src 'sha256-Ccs6f8zCGgPjYKTgZcG3fRas8aOTOlHTqaAdiUZR9Hw='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" },
+        { "key": "Content-Security-Policy", "value": "default-src 'self'; script-src 'sha256-ptaWkIy3UFEvtSL26a/ugTD2BqY+MpfzzIFnJwlrhGg='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" },
         { "key": "Referrer-Policy", "value": "no-referrer" },
         { "key": "X-Content-Type-Options", "value": "nosniff" },
         { "key": "X-Frame-Options", "value": "DENY" },
@@ -83,6 +87,12 @@
     "api/mcp/enterprise.ts": {
       "maxDuration": 800
     },
+    "api/mcp/readonly.ts": {
+      "maxDuration": 800
+    },
+    "api/mcp/enterprise-readonly.ts": {
+      "maxDuration": 800
+    },
     "api/mcp/docs.ts": {
       "maxDuration": 30
     },
@@ -93,6 +103,12 @@
       "maxDuration": 10
     },
     "api/well-known/oauth-protected-resource-enterprise.ts": {
+      "maxDuration": 10
+    },
+    "api/well-known/oauth-protected-resource-readonly.ts": {
+      "maxDuration": 10
+    },
+    "api/well-known/oauth-protected-resource-enterprise-readonly.ts": {
       "maxDuration": 10
     },
     "api/well-known/oauth-authorization-server.ts": {

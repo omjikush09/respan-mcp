@@ -1,0 +1,42 @@
+name: CI
+
+# Vercel deploys every merge to main straight to Production and runs only
+# `tsc` while building. This job runs the type checks, the test suite and the
+# build on every pull request, so a red change is visible before it ships.
+# To block merges on it, make the "Types, tests and build" check required on
+# main.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A new push to a PR supersedes its previous run. Runs on main are never
+# cancelled: every merged commit deploys, so every one needs its own result.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: Types, tests and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # tsc for the source and for tests/ + scripts/, then vitest
+      # (including tests/tool-surface.test.ts).
+      - run: npm run check
+
+      - run: npm run build
