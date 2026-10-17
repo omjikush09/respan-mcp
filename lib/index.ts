@@ -7,10 +7,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { resolveAuthFromEnv, createClient } from "./shared/client.js";
 import { registerProductionTools } from "./production/index.js";
+import { registerGuardrailTools } from "./pulses/guardrails.js";
 import { registerPulseTools } from "./pulses/index.js";
 import { registerPromptTools } from "./develop/prompts.js";
 import { registerOrganizationTools } from "./account/organizations.js";
 import { applyToolPolicy } from "./shared/tool-policy.js";
+import { SERVER_INSTRUCTIONS } from "./shared/instructions.js";
 import { rewriteToolCallNames } from "./shared/tool-aliases.js";
 
 async function main() {
@@ -22,16 +24,17 @@ async function main() {
     console.error("Only public tools will be available.");
   }
 
-  const server = new McpServer({
-    name: "respan",
-    version: "1.0.0",
-  });
+  const server = new McpServer(
+    { name: "respan", version: "1.0.0" },
+    { instructions: SERVER_INSTRUCTIONS },
+  );
   applyToolPolicy(server);
   applyProductVocabulary(server);
   applyToolCatalog(server);
 
   registerProductionTools(server, client);
   registerPulseTools(server, client);
+  registerGuardrailTools(server, client);
   registerPromptTools(server, client);
   registerMonitorTools(server, client);
   registerOrganizationTools(server, client);

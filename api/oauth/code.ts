@@ -3,6 +3,7 @@ import { OAuthBroker } from '../../lib/oauth/broker.js';
 import { getOAuthConfig, type OAuthRealm } from '../../lib/oauth/config.js';
 import { OAuthRequestError } from '../../lib/oauth/errors.js';
 import { hashOpaqueToken } from '../../lib/oauth/crypto.js';
+import { hasWriteScope, requestedScope } from '../../lib/oauth/scopes.js';
 import { getSessionStore } from '../../lib/oauth/store-factory.js';
 import { SessionStoreUnavailableError } from '../../lib/oauth/store.js';
 import {
@@ -69,6 +70,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       client_name: pending.value.clientName,
       redirect_uri: pending.value.redirectUri,
       resource: pending.value.resource,
+      // The consent page offers "Also allow changes" only when the client asked.
+      is_write_requested: hasWriteScope(requestedScope(pending.value.requestedScope)),
     });
   } catch (error) {
     if (error instanceof SessionStoreUnavailableError) {

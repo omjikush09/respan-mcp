@@ -25,14 +25,14 @@ async function fixture(responses: Array<{ status?: number; body: unknown }> = [{
 const window = { start_time: '2026-10-01T00:00:00Z', end_time: '2026-10-02T00:00:00Z' };
 
 describe('feature-oriented MCP contracts', () => {
-  it('exposes eight categories and the agreed feature operations without a conversation product', async () => {
+  it('exposes nine categories and the agreed feature operations without a conversation product', async () => {
     const { client } = await fixture();
     try {
       const { tools } = await client.listTools();
       const names = tools.map(t => t.name);
-      expect(tools).toHaveLength(52);
-      expect(new Set(tools.map(t => t._meta?.['respan/category'])).size).toBe(8);
-      for (const name of ['trace_summary', 'log_summary', 'behavior_summary', 'behavior_records', 'behavior_settings_get', 'behavior_settings_update', 'error_group_list', 'error_group_get', 'error_timeseries', 'incident_list', 'metrics_summary', 'metrics_timeseries', 'metrics_grouped', 'user_usage_list', 'monitor_alert_list', 'monitor_alert_timeseries', 'notification_destination_list', 'notification_destination_get', 'prompt_version_list', 'prompt_draft_update', 'workspace_current', 'workspace_list', 'workspace_switch']) expect(names).toContain(name);
+      expect(tools).toHaveLength(56);
+      expect(new Set(tools.map(t => t._meta?.['respan/category'])).size).toBe(9);
+      for (const name of ['trace_summary', 'log_summary', 'behavior_summary', 'behavior_records', 'behavior_settings_get', 'behavior_settings_update', 'error_group_list', 'error_group_get', 'error_timeseries', 'incident_list', 'metrics_summary', 'metrics_timeseries', 'metrics_grouped', 'user_usage_list', 'monitor_alert_list', 'monitor_alert_timeseries', 'notification_destination_list', 'notification_destination_get', 'prompt_version_list', 'prompt_draft_update', 'workspace_current', 'workspace_list', 'workspace_switch', 'guardrail_summary', 'guardrail_timeseries', 'guardrail_grouped', 'guardrail_list']) expect(names).toContain(name);
       for (const name of ['thread_list', 'thread_get', 'pulse_behaviors_summary', 'org_list']) expect(names).not.toContain(name);
     } finally { await client.close(); }
   });

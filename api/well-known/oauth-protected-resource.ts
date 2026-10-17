@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { SUPPORTED_SCOPES } from '../../lib/oauth/scopes.js';
 
 export default function handler(_req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -14,5 +15,6 @@ export default function handler(_req: VercelRequest, res: VercelResponse) {
   return res.status(200).json({
     resource: `${origin}/mcp`,
     authorization_servers: [origin],
+    scopes_supported: [...SUPPORTED_SCOPES],
   });
 }

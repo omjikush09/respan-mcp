@@ -4,7 +4,7 @@ import { READ_ONLY_WORKSPACE_TOOL } from "../shared/tool-result.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { AuthenticatedClient } from "../shared/client.js";
-import { rawFetch, requireClient } from "../shared/client.js";
+import { isUnauthorized, rawFetch, requireClient } from "../shared/client.js";
 
 const TEAMS_PATH = "/auth/teams/";
 const CURRENT_ORGANIZATION_PATH = "/auth/current-organization/";
@@ -31,11 +31,6 @@ export type Organization = {
   is_current: boolean;
   is_switchable: boolean;
 };
-
-/** True when the backend rejected the call because it was not JWT-authenticated. */
-function isUnauthorized(error: unknown): boolean {
-  return error instanceof Error && /^401\b/.test(error.message);
-}
 
 // A 401 from /auth/teams/ has two causes and we cannot tell them apart from the
 // status alone: the session is API-key based (JWT-only endpoint), or an OAuth
